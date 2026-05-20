@@ -1,6 +1,10 @@
 """
 Groww broker implementation.
 Wraps the official growwapi SDK with our abstract broker interface.
+
+Handles:
+- Equity/FNO via subscribe_ltp()
+- Indices via subscribe_index_value()
 """
 
 from typing import Any, Callable
@@ -20,6 +24,14 @@ from app.utils.config import GrowwConfig
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Known index tokens (Groww uses string names, not numeric tokens for indices)
+INDEX_TOKENS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"}
+
+
+def is_index_token(token: str) -> bool:
+    """Check if a token is an index (non-numeric or in known index list)."""
+    return token.upper() in INDEX_TOKENS or not token.isdigit()
 
 
 class GrowwBroker(BaseBroker):
@@ -75,8 +87,6 @@ class GrowwBroker(BaseBroker):
         """Fetch instruments list (placeholder for future use)."""
         if not self._api:
             raise RuntimeError("Not authenticated. Call authenticate() first.")
-        # The Groww SDK provides instruments via CSV download
-        # For now, return empty - instruments are configured via .env
         return []
 
     @property
@@ -91,6 +101,9 @@ class GrowwFeedClient(BrokerFeed):
     """
     Groww live market data feed client.
     Wraps GrowwFeed with our abstract BrokerFeed interface.
+
+    Handles both equity (subscribe_ltp) and index (subscribe_index_value)
+    subscriptions transparently based on the instrument token type.
     """
 
     def __init__(self, broker: GrowwBroker):
@@ -99,6 +112,7 @@ class GrowwFeedClient(BrokerFeed):
         self._on_tick: Callable[[Tick], None] | None = None
         self._on_depth: Callable[[MarketDepth], None] | None = None
         self._subscribed_ltp: list[Instrument] = []
+        self._subscribed_indices: list[Instrument] = []
         self._subscribed_depth: list[Instrument] = []
         self._running = False
 
@@ -120,6 +134,21 @@ class GrowwFeedClient(BrokerFeed):
             for inst in instruments
         ]
 
+    def _split_instruments(
+        self, instruments: list[Instrument]
+    ) -> tuple[list[Instrument], list[Instrument]]:
+        """Split instruments into equities and indices."""
+        equities = []
+        indices = []
+        for inst in instruments:
+            if is_index_token(inst.exchange_token):
+                indices.append(inst)
+            else:
+                equities.append(inst)
+        return equities, indices
+
+    # ─── Callbacks ───────────────────────────────────────────────
+
     def _handle_ltp_data(self, meta: dict) -> None:
         """Internal callback for LTP data from Groww feed."""
         logger.debug("LTP data received: %s", meta)
@@ -128,6 +157,17 @@ class GrowwFeedClient(BrokerFeed):
             feed = self._ensure_feed()
             ltp_data = feed.get_ltp()
             ticks = self._parse_ltp_data(ltp_data)
+            for tick in ticks:
+                self._on_tick(tick)
+
+    def _handle_index_data(self, meta: dict) -> None:
+        """Internal callback for index value data from Groww feed."""
+        logger.debug("Index data received: %s", meta)
+
+        if self._on_tick:
+            feed = self._ensure_feed()
+            index_data = feed.get_index_value()
+            ticks = self._parse_index_data(index_data)
             for tick in ticks:
                 self._on_tick(tick)
 
@@ -142,14 +182,13 @@ class GrowwFeedClient(BrokerFeed):
             for depth in depths:
                 self._on_depth(depth)
 
+    # ─── Parsers ─────────────────────────────────────────────────
+
     def _parse_ltp_data(self, raw: dict) -> list[Tick]:
         """Parse raw LTP response into normalized Tick objects."""
         ticks = []
 
-        # The Groww SDK returns either:
-        #   {"ltp": {"NSE": {"CASH": {"2885": {...}}}}}  (documented format)
-        #   {"NSE": {"CASH": {"2885": {...}}}}           (actual format from get_ltp())
-        # Handle both cases.
+        # Handle both {"ltp": {"NSE": {...}}} and {"NSE": {...}} formats
         if "ltp" in raw:
             data_root = raw["ltp"]
         else:
@@ -175,15 +214,44 @@ class GrowwFeedClient(BrokerFeed):
                     )
         return ticks
 
+    def _parse_index_data(self, raw: dict) -> list[Tick]:
+        """Parse raw index value response into normalized Tick objects."""
+        ticks = []
+
+        # Index response: {"NSE": {"CASH": {"NIFTY": {"tsInMillis": ..., "value": ...}}}}
+        for exchange, segments in raw.items():
+            if not isinstance(segments, dict):
+                continue
+            for segment, tokens in segments.items():
+                if not isinstance(tokens, dict):
+                    continue
+                for token, data in tokens.items():
+                    if not isinstance(data, dict):
+                        continue
+                    ticks.append(
+                        Tick(
+                            exchange=exchange,
+                            segment=segment,
+                            exchange_token=token,
+                            ltp=data.get("value", 0.0),
+                            timestamp_ms=data.get("tsInMillis", 0.0),
+                        )
+                    )
+        return ticks
+
     def _parse_depth_data(self, raw: dict) -> list[MarketDepth]:
         """Parse raw market depth response into normalized MarketDepth objects."""
         depths = []
 
         for exchange, segments in raw.items():
-            if exchange in ("ltp",):
+            if not isinstance(segments, dict):
                 continue
             for segment, tokens in segments.items():
+                if not isinstance(tokens, dict):
+                    continue
                 for token, data in tokens.items():
+                    if not isinstance(data, dict):
+                        continue
                     buy_levels = []
                     sell_levels = []
 
@@ -215,23 +283,49 @@ class GrowwFeedClient(BrokerFeed):
                     )
         return depths
 
+    # ─── Subscribe / Unsubscribe ─────────────────────────────────
+
     def subscribe_ltp(
         self,
         instruments: list[Instrument],
         on_tick: Callable[[Tick], None] | None = None,
     ) -> None:
-        """Subscribe to LTP updates for given instruments."""
+        """
+        Subscribe to LTP updates for given instruments.
+        Automatically routes indices to subscribe_index_value().
+        """
         feed = self._ensure_feed()
         self._on_tick = on_tick
-        self._subscribed_ltp = instruments
 
-        sdk_instruments = self._to_sdk_format(instruments)
-        logger.info("Subscribing to LTP for %d instruments", len(instruments))
+        equities, indices = self._split_instruments(instruments)
+        self._subscribed_ltp = equities
+        self._subscribed_indices = indices
 
-        if on_tick:
-            feed.subscribe_ltp(sdk_instruments, on_data_received=self._handle_ltp_data)
-        else:
-            feed.subscribe_ltp(sdk_instruments)
+        # Subscribe equities via subscribe_ltp
+        if equities:
+            sdk_equities = self._to_sdk_format(equities)
+            logger.info(
+                "Subscribing to LTP for %d equities: %s",
+                len(equities),
+                [i.exchange_token for i in equities],
+            )
+            if on_tick:
+                feed.subscribe_ltp(sdk_equities, on_data_received=self._handle_ltp_data)
+            else:
+                feed.subscribe_ltp(sdk_equities)
+
+        # Subscribe indices via subscribe_index_value
+        if indices:
+            sdk_indices = self._to_sdk_format(indices)
+            logger.info(
+                "Subscribing to index value for %d indices: %s",
+                len(indices),
+                [i.exchange_token for i in indices],
+            )
+            if on_tick:
+                feed.subscribe_index_value(sdk_indices, on_data_received=self._handle_index_data)
+            else:
+                feed.subscribe_index_value(sdk_indices)
 
     def subscribe_market_depth(
         self,
@@ -254,8 +348,13 @@ class GrowwFeedClient(BrokerFeed):
     def unsubscribe_ltp(self, instruments: list[Instrument]) -> None:
         """Unsubscribe from LTP updates."""
         feed = self._ensure_feed()
-        sdk_instruments = self._to_sdk_format(instruments)
-        feed.unsubscribe_ltp(sdk_instruments)
+        equities, indices = self._split_instruments(instruments)
+
+        if equities:
+            feed.unsubscribe_ltp(self._to_sdk_format(equities))
+        if indices:
+            feed.unsubscribe_index_value(self._to_sdk_format(indices))
+
         logger.info("Unsubscribed from LTP for %d instruments", len(instruments))
 
     def unsubscribe_market_depth(self, instruments: list[Instrument]) -> None:
@@ -283,8 +382,9 @@ class GrowwFeedClient(BrokerFeed):
     def stop(self) -> None:
         """Stop the feed gracefully."""
         self._running = False
-        if self._subscribed_ltp:
-            self.unsubscribe_ltp(self._subscribed_ltp)
+        all_instruments = self._subscribed_ltp + self._subscribed_indices
+        if all_instruments:
+            self.unsubscribe_ltp(all_instruments)
         if self._subscribed_depth:
             self.unsubscribe_market_depth(self._subscribed_depth)
         logger.info("Feed stopped")
