@@ -11,6 +11,7 @@ from app.core.events import EventBus
 from app.core.models import Candle, Signal
 from app.strategy.base import BaseStrategy
 from app.utils.logger import get_logger
+from app.utils.market_hours import should_process_for_strategy
 
 logger = get_logger(__name__)
 
@@ -81,8 +82,10 @@ class StrategyEngine:
         logger.info("StrategyEngine stopped")
 
     def _on_tick(self, tick: Tick) -> None:
-        """Route tick to all strategies."""
+        """Route tick to all strategies. Respects market hours."""
         if not self._running:
+            return
+        if not should_process_for_strategy():
             return
 
         for strategy in self._strategies:
@@ -99,8 +102,10 @@ class StrategyEngine:
                 )
 
     def _on_candle(self, candle: Candle) -> None:
-        """Route candle to all strategies with history."""
+        """Route candle to all strategies with history. Respects market hours."""
         if not self._running:
+            return
+        if not should_process_for_strategy():
             return
 
         # Get history for this instrument/timeframe

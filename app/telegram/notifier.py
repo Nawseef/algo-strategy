@@ -174,6 +174,7 @@ class TelegramNotifier:
         self._trades_opened += 1
         name = get_instrument_name(position.exchange_token)
         direction = "BOUGHT" if position.side.value == "BUY" else "SOLD SHORT"
+        invested = position.quantity * position.entry_price
 
         msg = (
             f"{'- '*15}\n"
@@ -181,8 +182,9 @@ class TelegramNotifier:
             f"{'- '*15}\n\n"
             f"Action: {direction}\n"
             f"Stock: {name}\n"
-            f"Qty: {position.quantity}\n"
+            f"Qty: {position.quantity} shares\n"
             f"Entry Price: Rs.{position.entry_price:,.2f}\n"
+            f"Invested: Rs.{invested:,.2f}\n"
             f"Time: {datetime.now().strftime('%I:%M %p')}\n\n"
             f"Strategy: {position.strategy_name}\n\n"
             f"Open positions: {len(self._paper_trader.open_positions) if self._paper_trader else '?'}"
