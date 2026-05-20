@@ -18,12 +18,14 @@ Messages sent:
 import json
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
 
 from app.core.events import EventBus
 from app.core.models import OrderSide, Position, Signal
+from app.utils.instruments import get_instrument_name
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -139,10 +141,11 @@ class TelegramNotifier:
     def _on_signal(self, signal: Signal) -> None:
         self._signals_count += 1
         emoji = "🟢" if signal.signal_type.value == "BUY" else "🔴"
+        name = get_instrument_name(signal.exchange_token)
         msg = (
-            f"{emoji} *SIGNAL: {signal.signal_type.value}*\n"
-            f"Token: `{signal.exchange_token}`\n"
-            f"Price: ₹{signal.price:.2f}\n"
+            f"{emoji} SIGNAL: {signal.signal_type.value}\n"
+            f"Stock: {name}\n"
+            f"Price: Rs.{signal.price:.2f}\n"
             f"Strategy: {signal.strategy_name}\n"
             f"Reason: {signal.reason}"
         )
@@ -151,12 +154,13 @@ class TelegramNotifier:
     def _on_position_open(self, position: Position) -> None:
         self._trades_opened += 1
         emoji = "📈" if position.side.value == "BUY" else "📉"
+        name = get_instrument_name(position.exchange_token)
         msg = (
-            f"{emoji} *POSITION OPENED*\n"
+            f"{emoji} POSITION OPENED\n"
             f"Side: {position.side.value}\n"
-            f"Token: `{position.exchange_token}`\n"
+            f"Stock: {name}\n"
             f"Qty: {position.quantity}\n"
-            f"Entry: ₹{position.entry_price:.2f}\n"
+            f"Entry: Rs.{position.entry_price:.2f}\n"
             f"Strategy: {position.strategy_name}"
         )
         self._send(msg)
@@ -165,19 +169,20 @@ class TelegramNotifier:
         self._trades_closed += 1
         emoji = "✅" if position.pnl >= 0 else "❌"
         pnl_emoji = "+" if position.pnl >= 0 else ""
+        name = get_instrument_name(position.exchange_token)
         msg = (
-            f"{emoji} *POSITION CLOSED*\n"
-            f"Token: `{position.exchange_token}`\n"
+            f"{emoji} POSITION CLOSED\n"
+            f"Stock: {name}\n"
             f"Side: {position.side.value}\n"
-            f"Entry: ₹{position.entry_price:.2f} → Exit: ₹{position.exit_price:.2f}\n"
-            f"PnL: {pnl_emoji}₹{position.pnl:.2f} ({pnl_emoji}{position.pnl_pct:.1f}%)\n"
+            f"Entry: Rs.{position.entry_price:.2f} -> Exit: Rs.{position.exit_price:.2f}\n"
+            f"PnL: {pnl_emoji}Rs.{position.pnl:.2f} ({pnl_emoji}{position.pnl_pct:.1f}%)\n"
             f"Strategy: {position.strategy_name}"
         )
 
         # Add running total if paper trader available
         if self._paper_trader:
             total = self._paper_trader.total_pnl
-            msg += f"\n\n📊 Day total: ₹{total:.2f}"
+            msg += f"\n\nDay total: Rs.{total:.2f}"
 
         self._send(msg)
 
@@ -312,5 +317,23 @@ class TelegramNotifier:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 if resp.status != 200:
                     logger.warning("Telegram API returned %d", resp.status)
+        except urllib.error.HTTPError as e:
+            # Markdown parsing failed — retry without formatting
+            logger.warning("Telegram Markdown error, retrying plain: %s", e)
+            payload_plain = json.dumps({
+                "chat_id": self._chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            }).encode("utf-8")
+            try:
+                req2 = urllib.request.Request(
+                    url,
+                    data=payload_plain,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req2, timeout=10)
+            except Exception as e2:
+                logger.error("Telegram send failed (plain): %s", e2)
         except Exception as e:
             logger.error("Telegram send failed: %s", e)
