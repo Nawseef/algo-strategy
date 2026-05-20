@@ -111,6 +111,11 @@ def main() -> None:
         event_bus=event_bus,
         default_quantity=config.paper_trading.default_quantity,
         max_open_positions=config.paper_trading.max_open_positions,
+        starting_balance=config.paper_trading.starting_balance,
+        position_size_pct=config.paper_trading.position_size_pct,
+        slippage_pct=0.05,       # 0.05% slippage per trade
+        brokerage_pct=0.05,      # 0.05% charges (STT + brokerage + GST approx)
+        signal_cooldown_seconds=120,  # 2 min cooldown between signals per stock
     )
     paper_trader.start()
 

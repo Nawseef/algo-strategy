@@ -32,10 +32,12 @@ class SMACrossoverStrategy(BaseStrategy):
         fast_period: int = 5,
         slow_period: int = 20,
         instrument_tokens: list[str] | None = None,
+        min_volume: int = 3,
     ) -> None:
         self._fast_period = fast_period
         self._slow_period = slow_period
         self._instrument_tokens = instrument_tokens or []
+        self._min_volume = min_volume  # minimum candle volume to consider signal valid
 
         # Track previous SMA state per instrument for crossover detection
         self._prev_fast: dict[str, float] = {}
@@ -54,6 +56,20 @@ class SMACrossoverStrategy(BaseStrategy):
         # Need enough history for slow SMA
         if len(history) < self._slow_period:
             return None
+
+        # Volume filter: skip if current candle has very low volume
+        if candle.volume < self._min_volume:
+            return None
+
+        # Gap filter: if the latest candle moved more than 3% from previous close,
+        # skip it (likely a gap at market open, SMA will be unreliable)
+        if len(history) >= 2:
+            prev_close = history[-2].close
+            if prev_close > 0:
+                gap_pct = abs(candle.close - prev_close) / prev_close * 100
+                if gap_pct > 3.0:
+                    logger.debug("Gap detected (%.1f%%) on %s, skipping", gap_pct, candle.exchange_token)
+                    return None
 
         # Calculate SMAs from closing prices
         closes = [c.close for c in history[-self._slow_period:]]

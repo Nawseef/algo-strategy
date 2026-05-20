@@ -8,6 +8,8 @@ Listens for 'signal' events and manages the full trade lifecycle:
 All trades are tracked internally. No broker orders are placed.
 """
 
+import random
+import threading
 import uuid
 
 from app.broker.base import Tick
@@ -20,6 +22,7 @@ from app.core.models import (
     SignalType,
 )
 from app.utils.logger import get_logger
+from app.utils.market_hours import can_open_new_position, should_square_off
 
 logger = get_logger(__name__)
 
@@ -52,15 +55,26 @@ class PaperTradingEngine:
         default_quantity: int = 1,
         max_open_positions: int = 0,
         allow_multiple_positions: bool = False,
+        starting_balance: float = 100000.0,
+        position_size_pct: float = 10.0,
+        slippage_pct: float = 0.05,
+        brokerage_pct: float = 0.05,
+        signal_cooldown_seconds: float = 120.0,
     ) -> None:
         self._event_bus = event_bus
         self._default_quantity = default_quantity
         self._max_open_positions = max_open_positions
         self._allow_multiple = allow_multiple_positions
+        self._starting_balance = starting_balance
+        self._position_size_pct = position_size_pct
+        self._slippage_pct = slippage_pct  # ±0.05% random slippage
+        self._brokerage_pct = brokerage_pct  # 0.05% per trade (entry + exit)
+        self._signal_cooldown = signal_cooldown_seconds  # min seconds between signals per instrument
 
         # State
         self._orders: list[PaperOrder] = []
         self._positions: list[Position] = []
+        self._last_signal_time: dict[str, float] = {}  # token -> last signal timestamp
         self._latest_prices: dict[str, float] = {}  # token -> last price
         self._running = False
 
@@ -69,6 +83,7 @@ class PaperTradingEngine:
         self._running = True
         self._event_bus.subscribe("signal", self.on_signal)
         self._event_bus.subscribe("tick", self.on_tick)
+        self._start_square_off_timer()
         logger.info(
             "PaperTradingEngine started (qty=%d, max_positions=%s)",
             self._default_quantity,
@@ -78,6 +93,8 @@ class PaperTradingEngine:
     def stop(self) -> None:
         """Stop the paper trading engine."""
         self._running = False
+        if hasattr(self, '_square_off_timer') and self._square_off_timer:
+            self._square_off_timer.cancel()
         self._event_bus.unsubscribe("signal", self.on_signal)
         self._event_bus.unsubscribe("tick", self.on_tick)
         logger.info("PaperTradingEngine stopped")
@@ -90,17 +107,35 @@ class PaperTradingEngine:
     def on_signal(self, signal: Signal) -> None:
         """
         Process a trading signal.
-        Decides whether to open a new position or close an existing one.
+        Respects market hours, cooldown, and position limits.
         """
         if not self._running:
             return
 
+        # Duplicate signal suppression (cooldown)
+        import time as _time
+        now = _time.time()
+        last = self._last_signal_time.get(signal.exchange_token, 0)
+        if now - last < self._signal_cooldown:
+            logger.debug("Signal cooldown active for %s, skipping", signal.exchange_token)
+            return
+        self._last_signal_time[signal.exchange_token] = now
+
         logger.info("Processing signal: %s", signal)
 
+        # Apply slippage to signal price
+        execution_price = self._apply_slippage(signal.price, signal.signal_type)
+
         # Check if we have an opposing open position to close
+        # (closing is always allowed, even near market close)
         existing = self._find_opposing_position(signal)
         if existing:
-            self._close_position(existing, signal.price, signal.timestamp_ms)
+            self._close_position(existing, execution_price, signal.timestamp_ms)
+            return
+
+        # No new positions after 3:15 PM
+        if not can_open_new_position():
+            logger.info("Market closing soon — not opening new position")
             return
 
         # Check position limits
@@ -111,8 +146,8 @@ class PaperTradingEngine:
             )
             return
 
-        # Open new position
-        self._open_position(signal)
+        # Open new position at slipped price
+        self._open_position(signal, execution_price)
 
     def _find_opposing_position(self, signal: Signal) -> Position | None:
         """Find an open position that opposes this signal (to close it)."""
@@ -157,11 +192,17 @@ class PaperTradingEngine:
 
         return True
 
-    def _open_position(self, signal: Signal) -> None:
-        """Open a new paper position from a signal."""
+    def _open_position(self, signal: Signal, execution_price: float) -> None:
+        """Open a new paper position with slippage and brokerage."""
         side = OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL
         order_id = self._generate_id("ORD")
         position_id = self._generate_id("POS")
+
+        # Calculate quantity based on position sizing
+        quantity = self._calculate_quantity(execution_price)
+        if quantity <= 0:
+            logger.warning("Cannot open position: insufficient balance for %s @ %.2f", signal.exchange_token, execution_price)
+            return
 
         # Create order
         order = PaperOrder(
@@ -170,8 +211,8 @@ class PaperTradingEngine:
             exchange=signal.exchange,
             segment=signal.segment,
             exchange_token=signal.exchange_token,
-            quantity=self._default_quantity,
-            price=signal.price,
+            quantity=quantity,
+            price=execution_price,
             timestamp_ms=signal.timestamp_ms,
             strategy_name=signal.strategy_name,
             signal_reason=signal.reason,
@@ -185,8 +226,8 @@ class PaperTradingEngine:
             segment=signal.segment,
             exchange_token=signal.exchange_token,
             side=side,
-            quantity=self._default_quantity,
-            entry_price=signal.price,
+            quantity=quantity,
+            entry_price=execution_price,
             entry_time_ms=signal.timestamp_ms,
             strategy_name=signal.strategy_name,
         )
@@ -196,8 +237,8 @@ class PaperTradingEngine:
             "POSITION OPENED | %s %s qty=%d @%.2f | strategy=%s | reason=%s",
             side.value,
             signal.exchange_token,
-            self._default_quantity,
-            signal.price,
+            quantity,
+            execution_price,
             signal.strategy_name,
             signal.reason,
         )
@@ -209,8 +250,15 @@ class PaperTradingEngine:
     def _close_position(
         self, position: Position, exit_price: float, exit_time_ms: float
     ) -> None:
-        """Close an existing position."""
+        """Close an existing position with brokerage deduction."""
         position.close(exit_price, exit_time_ms)
+
+        # Deduct brokerage from PnL
+        position.pnl = self._apply_brokerage(
+            position.pnl, position.entry_price, exit_price, position.quantity
+        )
+        if position.entry_price > 0:
+            position.pnl_pct = (position.pnl / (position.entry_price * position.quantity)) * 100
 
         logger.info(
             "POSITION CLOSED | %s %s qty=%d | entry=%.2f exit=%.2f | PnL=%.2f (%.2f%%)",
@@ -300,3 +348,74 @@ class PaperTradingEngine:
             if pos.exchange_token == exchange_token:
                 return pos
         return None
+
+    # ─── Slippage & Brokerage ────────────────────────────────────
+
+    def _apply_slippage(self, price: float, signal_type: SignalType) -> float:
+        """
+        Apply random slippage to simulate real execution.
+        BUY: price goes slightly UP (you pay more)
+        SELL: price goes slightly DOWN (you receive less)
+        """
+        slippage = price * (self._slippage_pct / 100) * random.uniform(0, 1)
+        if signal_type == SignalType.BUY:
+            return price + slippage
+        else:
+            return price - slippage
+
+    def _apply_brokerage(self, pnl: float, entry_price: float, exit_price: float, quantity: int) -> float:
+        """
+        Deduct brokerage charges from PnL.
+        Charges apply on both entry and exit (total turnover).
+        """
+        turnover = (entry_price * quantity) + (exit_price * quantity)
+        charges = turnover * (self._brokerage_pct / 100)
+        return pnl - charges
+
+    # ─── Position Sizing ────────────────────────────────────────
+
+    def _calculate_quantity(self, price: float) -> int:
+        """
+        Calculate how many shares to buy based on position sizing rules.
+        Allocates position_size_pct% of current balance per trade.
+        
+        Example: balance=100000, position_size_pct=10, price=1350
+        → allocate Rs.10,000 → buy 7 shares
+        """
+        if price <= 0:
+            return 0
+
+        current_balance = self._starting_balance + self.total_pnl
+        allocation = current_balance * (self._position_size_pct / 100)
+        quantity = int(allocation / price)
+        return max(quantity, 0)
+
+    # ─── Auto Square-Off ─────────────────────────────────────────
+
+    def _start_square_off_timer(self) -> None:
+        """Check every 30 seconds if it's time to square off."""
+        if not self._running:
+            return
+        self._square_off_timer = threading.Timer(30, self._check_square_off)
+        self._square_off_timer.daemon = True
+        self._square_off_timer.start()
+
+    def _check_square_off(self) -> None:
+        """Auto-close all open positions at 3:20 PM."""
+        if not self._running:
+            return
+
+        if should_square_off() and self.open_positions:
+            logger.info("SQUARE OFF: Auto-closing %d positions (market closing)", len(self.open_positions))
+            import time as _time
+            now_ms = _time.time() * 1000
+
+            for pos in list(self.open_positions):
+                current_price = self._latest_prices.get(pos.exchange_token)
+                if current_price:
+                    self._close_position(pos, current_price, now_ms)
+                else:
+                    # Use entry price if no current price (shouldn't happen)
+                    self._close_position(pos, pos.entry_price, now_ms)
+
+        self._start_square_off_timer()
