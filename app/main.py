@@ -120,6 +120,7 @@ def main() -> None:
         bot_token=config.telegram.bot_token,
         chat_id=config.telegram.chat_id,
         paper_trader=paper_trader,
+        starting_balance=config.paper_trading.starting_balance,
         summary_interval_minutes=config.telegram.summary_interval_minutes,
         notify_signals=config.telegram.notify_signals,
         notify_positions=config.telegram.notify_positions,

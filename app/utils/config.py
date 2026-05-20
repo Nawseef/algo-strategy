@@ -48,6 +48,7 @@ class PaperTradingConfig:
     """Paper trading configuration."""
 
     default_quantity: int = field(default_factory=lambda: int(os.getenv("PAPER_QUANTITY", "1")))
+    starting_balance: float = field(default_factory=lambda: float(os.getenv("PAPER_STARTING_BALANCE", "100000")))
     max_open_positions: int = field(default_factory=lambda: int(os.getenv("PAPER_MAX_POSITIONS", "5")))
 
 
