@@ -145,11 +145,25 @@ class GrowwFeedClient(BrokerFeed):
     def _parse_ltp_data(self, raw: dict) -> list[Tick]:
         """Parse raw LTP response into normalized Tick objects."""
         ticks = []
-        ltp_section = raw.get("ltp", {})
 
-        for exchange, segments in ltp_section.items():
+        # The Groww SDK returns either:
+        #   {"ltp": {"NSE": {"CASH": {"2885": {...}}}}}  (documented format)
+        #   {"NSE": {"CASH": {"2885": {...}}}}           (actual format from get_ltp())
+        # Handle both cases.
+        if "ltp" in raw:
+            data_root = raw["ltp"]
+        else:
+            data_root = raw
+
+        for exchange, segments in data_root.items():
+            if not isinstance(segments, dict):
+                continue
             for segment, tokens in segments.items():
+                if not isinstance(tokens, dict):
+                    continue
                 for token, data in tokens.items():
+                    if not isinstance(data, dict):
+                        continue
                     ticks.append(
                         Tick(
                             exchange=exchange,

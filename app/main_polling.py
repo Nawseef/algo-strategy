@@ -157,10 +157,17 @@ def main() -> None:
 
 def _process_ltp(data: dict, event_bus: EventBus) -> None:
     """Parse polled LTP data and emit as tick events."""
-    ltp_section = data.get("ltp", {})
+    # Handle both {"ltp": {...}} and direct {"NSE": {...}} formats
+    ltp_section = data.get("ltp", data) if "ltp" in data else data
     for exchange, segments in ltp_section.items():
+        if not isinstance(segments, dict):
+            continue
         for segment, tokens in segments.items():
+            if not isinstance(tokens, dict):
+                continue
             for token, tick_data in tokens.items():
+                if not isinstance(tick_data, dict):
+                    continue
                 tick = Tick(
                     exchange=exchange,
                     segment=segment,
