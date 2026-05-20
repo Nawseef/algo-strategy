@@ -158,6 +158,10 @@ class GrowwFeedClient(BrokerFeed):
             ltp_data = feed.get_ltp()
             ticks = self._parse_ltp_data(ltp_data)
             for tick in ticks:
+                logger.info(
+                    "TICK | %s:%s %s | LTP=%.2f",
+                    tick.exchange, tick.segment, tick.exchange_token, tick.ltp,
+                )
                 self._on_tick(tick)
 
     def _handle_index_data(self, meta: dict) -> None:
@@ -169,6 +173,10 @@ class GrowwFeedClient(BrokerFeed):
             index_data = feed.get_index_value()
             ticks = self._parse_index_data(index_data)
             for tick in ticks:
+                logger.info(
+                    "TICK | %s:%s %s | VALUE=%.2f",
+                    tick.exchange, tick.segment, tick.exchange_token, tick.ltp,
+                )
                 self._on_tick(tick)
 
     def _handle_depth_data(self, meta: dict) -> None:
