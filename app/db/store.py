@@ -13,6 +13,7 @@ All writes are synchronous (SQLite is fast enough for this use case).
 """
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from app.core.events import EventBus
@@ -112,11 +113,12 @@ class TradeStore:
         self._event_bus = event_bus
         self._db_path = db_path or DEFAULT_DB_PATH
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()
 
     def start(self) -> None:
         """Initialize database and subscribe to events."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.executescript(SCHEMA)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -277,8 +279,9 @@ class TradeStore:
         if not self._conn:
             return
         try:
-            self._conn.execute(sql, params)
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(sql, params)
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error("DB write error: %s (sql=%s)", e, sql[:80])
 
@@ -287,9 +290,10 @@ class TradeStore:
         if not self._conn:
             return []
         try:
-            self._conn.row_factory = sqlite3.Row
-            cursor = self._conn.execute(sql, params)
-            return [dict(row) for row in cursor.fetchall()]
+            with self._lock:
+                self._conn.row_factory = sqlite3.Row
+                cursor = self._conn.execute(sql, params)
+                return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             logger.error("DB read error: %s", e)
             return []

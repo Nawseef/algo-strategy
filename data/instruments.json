@@ -1,0 +1,22 @@
+{
+  "2885": {"symbol": "RELIANCE", "name": "Reliance Industries"},
+  "11536": {"symbol": "HDFCBANK", "name": "HDFC Bank"},
+  "14366": {"symbol": "TCS", "name": "Tata Consultancy Services"},
+  "1922": {"symbol": "KOTAKBANK", "name": "Kotak Mahindra Bank"},
+  "3045": {"symbol": "SBIN", "name": "State Bank of India"},
+  "1594": {"symbol": "INFY", "name": "Infosys"},
+  "17388": {"symbol": "ITC", "name": "ITC Limited"},
+  "11723": {"symbol": "ICICIBANK", "name": "ICICI Bank"},
+  "10999": {"symbol": "BAJFINANCE", "name": "Bajaj Finance"},
+  "15083": {"symbol": "TATAMOTORS", "name": "Tata Motors"},
+  "16669": {"symbol": "WIPRO", "name": "Wipro"},
+  "20374": {"symbol": "ADANIENT", "name": "Adani Enterprises"},
+  "3787": {"symbol": "SUNPHARMA", "name": "Sun Pharma"},
+  "4306": {"symbol": "ULTRACEMCO", "name": "UltraTech Cement"},
+  "5258": {"symbol": "LT", "name": "Larsen & Toubro"},
+  "NIFTY": {"symbol": "NIFTY", "name": "Nifty 50 Index"},
+  "BANKNIFTY": {"symbol": "BANKNIFTY", "name": "Bank Nifty Index"},
+  "FINNIFTY": {"symbol": "FINNIFTY", "name": "Fin Nifty Index"},
+  "MIDCPNIFTY": {"symbol": "MIDCPNIFTY", "name": "Midcap Nifty Index"},
+  "SENSEX": {"symbol": "SENSEX", "name": "BSE Sensex"}
+}
