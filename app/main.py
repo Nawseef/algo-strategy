@@ -141,6 +141,40 @@ def _send_warmup_starting(telegram, config) -> None:
     telegram.send_message(msg)
 
 
+def _send_sleep_notification(wake_time) -> None:
+    """Send a telegram message that the bot is alive but sleeping until market open."""
+    import json
+    import os
+    import urllib.request
+    import urllib.error
+    from datetime import datetime
+
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not bot_token or not chat_id:
+        return
+
+    now = datetime.now()
+    msg = (
+        f"{'='*30}\n"
+        f"BOT SLEEPING\n"
+        f"{now.strftime('%d %b %Y')} | {now.strftime('%I:%M:%S %p')}\n"
+        f"{'='*30}\n\n"
+        f"Market is closed.\n"
+        f"Sleeping until: {wake_time.strftime('%d %b %I:%M %p')}\n"
+        f"Will auto-wake and start trading.\n"
+        f"{'='*30}"
+    )
+
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = json.dumps({"chat_id": chat_id, "text": msg}).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        logger.warning("Failed to send sleep notification: %s", e)
+
+
 def main() -> None:
     """Main execution flow — full pipeline."""
     global _shutdown_requested
@@ -169,6 +203,10 @@ def main() -> None:
                 wake_time.strftime("%Y-%m-%d %I:%M %p"),
                 sleep_seconds / 3600,
             )
+
+            # Send a quick telegram notification before sleeping
+            _send_sleep_notification(wake_time)
+
             # Handle SIGTERM during sleep so systemctl stop works
             signal.signal(signal.SIGINT, _sleep_shutdown_handler)
             signal.signal(signal.SIGTERM, _sleep_shutdown_handler)
