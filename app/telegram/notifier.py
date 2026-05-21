@@ -21,7 +21,7 @@ from datetime import datetime, time as dtime
 
 from app.core.events import EventBus
 from app.core.models import OrderSide, Position, Signal
-from app.utils.instruments import get_instrument_name
+from app.utils.instruments import get_instrument_name, get_instrument_short_name
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,11 +51,13 @@ class TelegramNotifier:
         notify_positions: bool = True,
         notify_reconnects: bool = True,
         notify_errors: bool = True,
+        multi_trader=None,
     ) -> None:
         self._event_bus = event_bus
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._paper_trader = paper_trader
+        self._multi_trader = multi_trader
         self._starting_balance = starting_balance
         self._summary_interval = summary_interval_minutes * 60
         self._notify_signals = notify_signals
@@ -88,6 +90,7 @@ class TelegramNotifier:
         # Subscribe to events
         if self._notify_signals:
             self._event_bus.subscribe("signal", self._on_signal)
+            self._event_bus.subscribe("confluence_signal", self._on_confluence_signal)
         if self._notify_positions:
             self._event_bus.subscribe("position_open", self._on_position_open)
             self._event_bus.subscribe("position_close", self._on_position_close)
@@ -138,6 +141,7 @@ class TelegramNotifier:
         # Unsubscribe
         if self._notify_signals:
             self._event_bus.unsubscribe("signal", self._on_signal)
+            self._event_bus.unsubscribe("confluence_signal", self._on_confluence_signal)
         if self._notify_positions:
             self._event_bus.unsubscribe("position_open", self._on_position_open)
             self._event_bus.unsubscribe("position_close", self._on_position_close)
@@ -157,16 +161,53 @@ class TelegramNotifier:
         direction = "BUY" if signal.signal_type.value == "BUY" else "SELL"
         arrow = "^" if direction == "BUY" else "v"
 
+        sl_tp_info = ""
+        if signal.stop_loss:
+            sl_tp_info += f"Stop Loss: Rs.{signal.stop_loss:,.2f}\n"
+        if signal.take_profit:
+            sl_tp_info += f"Take Profit: Rs.{signal.take_profit:,.2f}\n"
+        if signal.stop_loss and signal.take_profit:
+            risk = abs(signal.price - signal.stop_loss)
+            reward = abs(signal.take_profit - signal.price)
+            if risk > 0:
+                sl_tp_info += f"R:R = 1:{reward/risk:.1f}\n"
+
         msg = (
             f"{'- '*15}\n"
             f"{arrow} SIGNAL: {direction}\n"
             f"{'- '*15}\n\n"
-            f"Stock: {name}\n"
+            f"Instrument: {name}\n"
             f"Price: Rs.{signal.price:,.2f}\n"
+            f"{sl_tp_info}"
             f"Time: {datetime.now().strftime('%I:%M %p')}\n\n"
             f"Strategy: {signal.strategy_name}\n"
             f"Why: {signal.reason}\n\n"
             f"(Signal #{self._signals_count} today)"
+        )
+        self._send(msg)
+
+    def _on_confluence_signal(self, signal: Signal) -> None:
+        """Special notification for confluence signals — high conviction."""
+        name = get_instrument_name(signal.exchange_token)
+        direction = "BUY" if signal.signal_type.value == "BUY" else "SELL"
+
+        sl_tp_info = ""
+        if signal.stop_loss:
+            sl_tp_info += f"Stop Loss: Rs.{signal.stop_loss:,.2f}\n"
+        if signal.take_profit:
+            sl_tp_info += f"Take Profit: Rs.{signal.take_profit:,.2f}\n"
+
+        msg = (
+            f"{'*'*30}\n"
+            f"CONFLUENCE SIGNAL: {direction}\n"
+            f"{'*'*30}\n\n"
+            f"Instrument: {name}\n"
+            f"Price: Rs.{signal.price:,.2f}\n"
+            f"{sl_tp_info}"
+            f"Time: {datetime.now().strftime('%I:%M %p')}\n\n"
+            f"Strategy: {signal.strategy_name}\n"
+            f"Why: {signal.reason}\n\n"
+            f"HIGH CONVICTION — Multiple strategies agree!"
         )
         self._send(msg)
 
@@ -176,14 +217,21 @@ class TelegramNotifier:
         direction = "BOUGHT" if position.side.value == "BUY" else "SOLD SHORT"
         invested = position.quantity * position.entry_price
 
+        sl_tp_info = ""
+        if position.stop_loss > 0:
+            sl_tp_info += f"Stop Loss: Rs.{position.stop_loss:,.2f}\n"
+        if position.take_profit > 0:
+            sl_tp_info += f"Take Profit: Rs.{position.take_profit:,.2f}\n"
+
         msg = (
             f"{'- '*15}\n"
             f"TRADE OPENED #{self._trades_opened}\n"
             f"{'- '*15}\n\n"
             f"Action: {direction}\n"
-            f"Stock: {name}\n"
+            f"Instrument: {name}\n"
             f"Qty: {position.quantity} shares\n"
             f"Entry Price: Rs.{position.entry_price:,.2f}\n"
+            f"{sl_tp_info}"
             f"Invested: Rs.{invested:,.2f}\n"
             f"Time: {datetime.now().strftime('%I:%M %p')}\n\n"
             f"Strategy: {position.strategy_name}\n\n"
@@ -206,13 +254,13 @@ class TelegramNotifier:
             f"{'- '*15}\n"
             f"TRADE CLOSED - {result}\n"
             f"{'- '*15}\n\n"
-            f"Stock: {name}\n"
+            f"Instrument: {name}\n"
             f"Side: {position.side.value}\n"
             f"Entry: Rs.{position.entry_price:,.2f}\n"
             f"Exit: Rs.{position.exit_price:,.2f}\n"
             f"Hold time: {hold_min:.0f} min\n\n"
             f"PnL: {emoji}Rs.{position.pnl:,.2f} ({emoji}{position.pnl_pct:.2f}%)\n\n"
-            f"Why closed: Opposing signal (SMA crossed back)\n"
+            f"Why closed: {position.close_reason or 'Unknown'}\n"
         )
 
         # Running totals + streak + risk
@@ -309,7 +357,31 @@ class TelegramNotifier:
             f"{'='*30}\n"
         )
 
-        if self._paper_trader:
+        if self._multi_trader:
+            # Multi-strategy comparison
+            msg += "\n--- Strategy Comparison ---\n"
+            for name, trader in self._multi_trader.all_traders.items():
+                closed = trader.closed_positions
+                total = len(closed)
+                wins = len([p for p in closed if p.pnl > 0])
+                win_pct = (wins / total * 100) if total > 0 else 0
+                pnl = trader.total_pnl
+                open_count = len(trader.open_positions)
+                pnl_str = f"{'+' if pnl >= 0 else ''}Rs.{pnl:,.0f}"
+
+                msg += f"\n{name}:\n"
+                msg += f"  Trades: {total} | Win: {win_pct:.0f}% | PnL: {pnl_str}\n"
+                if open_count > 0:
+                    msg += f"  Open: {open_count} positions\n"
+
+            # Best performer
+            all_traders = self._multi_trader.all_traders
+            if all_traders:
+                best_name = max(all_traders.keys(), key=lambda n: all_traders[n].total_pnl)
+                best_pnl = all_traders[best_name].total_pnl
+                msg += f"\nBEST: {best_name} ({'+' if best_pnl >= 0 else ''}Rs.{best_pnl:,.0f})\n"
+
+        elif self._paper_trader:
             realized = self._paper_trader.total_pnl
             unrealized = self._paper_trader.unrealized_pnl
             balance = self._starting_balance + realized
@@ -322,37 +394,17 @@ class TelegramNotifier:
                 f"Unrealized: {'+' if unrealized >= 0 else ''}Rs.{unrealized:,.2f}\n"
             )
 
-            # Open positions
-            if open_pos:
-                msg += f"\n--- Open Positions ({len(open_pos)}) ---\n"
-                for pos in open_pos:
-                    name = get_instrument_name(pos.exchange_token)
-                    current = self._paper_trader._latest_prices.get(pos.exchange_token)
-                    if current:
-                        if pos.side == OrderSide.BUY:
-                            pos_pnl = (current - pos.entry_price) * pos.quantity
-                        else:
-                            pos_pnl = (pos.entry_price - current) * pos.quantity
-                        pnl_str = f"{'+' if pos_pnl >= 0 else ''}Rs.{pos_pnl:,.2f}"
-                        msg += f"\n{name}\n  {pos.side.value} @ Rs.{pos.entry_price:,.2f} -> Rs.{current:,.2f} ({pnl_str})\n"
-                    else:
-                        msg += f"\n{name}\n  {pos.side.value} @ Rs.{pos.entry_price:,.2f}\n"
-            else:
-                msg += "\nNo open positions\n"
-
-            # Today's stats
             if closed_pos:
                 wins = len([p for p in closed_pos if p.pnl > 0])
                 losses = len([p for p in closed_pos if p.pnl < 0])
                 msg += (
-                    f"\n--- Today's Stats ---\n"
-                    f"Trades closed: {len(closed_pos)}\n"
+                    f"\nTrades closed: {len(closed_pos)}\n"
                     f"Win/Loss: {wins}W / {losses}L\n"
-                    f"Win rate: {(wins/len(closed_pos)*100):.0f}%\n"
-                    f"Signals: {self._signals_count}\n"
                 )
         else:
             msg += "\nNo data available\n"
+
+        msg += f"\nSignals today: {self._signals_count}\n"
 
         self._send(msg)
         self._schedule_summary()
@@ -385,7 +437,7 @@ class TelegramNotifier:
         self._schedule_eod_check()
 
     def _send_eod_report(self) -> None:
-        """Comprehensive end-of-day report."""
+        """Comprehensive end-of-day report with multi-strategy comparison."""
         now = datetime.now()
 
         msg = (
@@ -395,79 +447,67 @@ class TelegramNotifier:
             f"{'='*30}\n"
         )
 
-        if not self._paper_trader:
-            msg += "\nNo trading data available"
-            self._send(msg)
-            return
+        if self._multi_trader:
+            all_traders = self._multi_trader.all_traders
 
-        realized = self._paper_trader.total_pnl
-        balance = self._starting_balance + realized
-        closed = self._paper_trader.closed_positions
-        open_pos = self._paper_trader.open_positions
+            msg += "\n--- STRATEGY COMPARISON ---\n"
+            msg += f"{'Strategy':<22} {'Tr':<4} {'W%':<5} {'PnL':<10}\n"
+            msg += "-" * 45 + "\n"
 
-        # Overall performance
-        day_return_pct = (realized / self._starting_balance) * 100 if self._starting_balance > 0 else 0
-        verdict = "GREEN DAY" if realized > 0 else "RED DAY" if realized < 0 else "FLAT DAY"
+            for name, trader in all_traders.items():
+                closed = trader.closed_positions
+                total = len(closed)
+                wins = len([p for p in closed if p.pnl > 0])
+                win_pct = (wins / total * 100) if total > 0 else 0
+                pnl = trader.total_pnl
+                pnl_str = f"{'+' if pnl >= 0 else ''}Rs.{pnl:,.0f}"
+                marker = " **" if "Confluence" in name else ""
+                msg += f"{name:<22} {total:<4} {win_pct:<4.0f}% {pnl_str}{marker}\n"
 
-        msg += (
-            f"\n{verdict}\n\n"
-            f"Starting Balance: Rs.{self._starting_balance:,.2f}\n"
-            f"Ending Balance: Rs.{balance:,.2f}\n"
-            f"Day PnL: {'+' if realized >= 0 else ''}Rs.{realized:,.2f} ({'+' if day_return_pct >= 0 else ''}{day_return_pct:.2f}%)\n"
-        )
+            msg += "-" * 45 + "\n"
 
-        # Trade stats
-        if closed:
-            wins = [p for p in closed if p.pnl > 0]
-            losses = [p for p in closed if p.pnl < 0]
-            win_rate = (len(wins) / len(closed)) * 100
+            # Best performer
+            best_name = max(all_traders.keys(), key=lambda n: all_traders[n].total_pnl)
+            best_pnl = all_traders[best_name].total_pnl
+            msg += f"\nBEST: {best_name}\n"
+            msg += f"PnL: {'+' if best_pnl >= 0 else ''}Rs.{best_pnl:,.0f}\n"
+
+            # Worst performer
+            worst_name = min(all_traders.keys(), key=lambda n: all_traders[n].total_pnl)
+            worst_pnl = all_traders[worst_name].total_pnl
+            msg += f"WORST: {worst_name} ({'+' if worst_pnl >= 0 else ''}Rs.{worst_pnl:,.0f})\n"
+
+            # Total signals
+            msg += f"\nTotal signals today: {self._signals_count}\n"
+            msg += f"Trades opened: {self._trades_opened}\n"
+            msg += f"Trades closed: {self._trades_closed}\n"
+
+        elif self._paper_trader:
+            realized = self._paper_trader.total_pnl
+            balance = self._starting_balance + realized
+            closed = self._paper_trader.closed_positions
+
+            day_return_pct = (realized / self._starting_balance) * 100 if self._starting_balance > 0 else 0
+            verdict = "GREEN DAY" if realized > 0 else "RED DAY" if realized < 0 else "FLAT DAY"
 
             msg += (
-                f"\n--- Trade Stats ---\n"
-                f"Total trades: {len(closed)}\n"
-                f"Winners: {len(wins)} | Losers: {len(losses)}\n"
-                f"Win rate: {win_rate:.0f}%\n"
+                f"\n{verdict}\n\n"
+                f"Starting Balance: Rs.{self._starting_balance:,.2f}\n"
+                f"Ending Balance: Rs.{balance:,.2f}\n"
+                f"Day PnL: {'+' if realized >= 0 else ''}Rs.{realized:,.2f} ({'+' if day_return_pct >= 0 else ''}{day_return_pct:.2f}%)\n"
             )
 
-            if wins:
-                msg += f"Best trade: +Rs.{max(p.pnl for p in wins):,.2f}\n"
-            if losses:
-                msg += f"Worst trade: -Rs.{abs(min(p.pnl for p in losses)):,.2f}\n"
-
-            avg_win = sum(p.pnl for p in wins) / len(wins) if wins else 0
-            avg_loss = sum(p.pnl for p in losses) / len(losses) if losses else 0
-            msg += f"Avg win: +Rs.{avg_win:,.2f}\n"
-            msg += f"Avg loss: Rs.{avg_loss:,.2f}\n"
-
-            # Per-stock breakdown
-            stock_pnl: dict[str, float] = defaultdict(float)
-            stock_trades: dict[str, int] = defaultdict(int)
-            for p in closed:
-                name = get_instrument_name(p.exchange_token)
-                stock_pnl[name] += p.pnl
-                stock_trades[name] += 1
-
-            msg += f"\n--- By Stock ---\n"
-            for name, pnl in sorted(stock_pnl.items(), key=lambda x: x[1], reverse=True):
-                trades = stock_trades[name]
-                msg += f"{name}: {'+' if pnl >= 0 else ''}Rs.{pnl:,.2f} ({trades} trades)\n"
+            if closed:
+                wins = [p for p in closed if p.pnl > 0]
+                losses = [p for p in closed if p.pnl < 0]
+                win_rate = (len(wins) / len(closed)) * 100
+                msg += (
+                    f"\nTotal trades: {len(closed)}\n"
+                    f"Winners: {len(wins)} | Losers: {len(losses)}\n"
+                    f"Win rate: {win_rate:.0f}%\n"
+                )
         else:
-            msg += "\nNo trades completed today\n"
-
-        # Open positions carried forward
-        if open_pos:
-            msg += f"\n--- Carried Forward ({len(open_pos)} open) ---\n"
-            for pos in open_pos:
-                name = get_instrument_name(pos.exchange_token)
-                msg += f"{name} {pos.side.value} @ Rs.{pos.entry_price:,.2f}\n"
-
-        # Activity
-        msg += (
-            f"\n--- Activity ---\n"
-            f"Signals generated: {self._signals_count}\n"
-            f"Trades opened: {self._trades_opened}\n"
-            f"Trades closed: {self._trades_closed}\n"
-        )
+            msg += "\nNo trading data available\n"
 
         msg += f"\n{'='*30}\n"
         msg += "Bot continues running. See you tomorrow."
@@ -502,6 +542,13 @@ class TelegramNotifier:
         self._send(msg)
 
     # ─── Send ────────────────────────────────────────────────────
+
+    def send_message(self, text: str) -> None:
+        """
+        Public method to send an arbitrary message via Telegram.
+        Used by main.py for startup/warmup notifications.
+        """
+        self._send(text)
 
     def _send(self, text: str) -> None:
         """Send a message via Telegram Bot API. Plain text, no markdown issues."""

@@ -1,22 +1,937 @@
 {
-  "2885": {"symbol": "RELIANCE", "name": "Reliance Industries"},
-  "11536": {"symbol": "HDFCBANK", "name": "HDFC Bank"},
-  "14366": {"symbol": "TCS", "name": "Tata Consultancy Services"},
-  "1922": {"symbol": "KOTAKBANK", "name": "Kotak Mahindra Bank"},
-  "3045": {"symbol": "SBIN", "name": "State Bank of India"},
-  "1594": {"symbol": "INFY", "name": "Infosys"},
-  "17388": {"symbol": "ITC", "name": "ITC Limited"},
-  "11723": {"symbol": "ICICIBANK", "name": "ICICI Bank"},
-  "10999": {"symbol": "BAJFINANCE", "name": "Bajaj Finance"},
-  "15083": {"symbol": "TATAMOTORS", "name": "Tata Motors"},
-  "16669": {"symbol": "WIPRO", "name": "Wipro"},
-  "20374": {"symbol": "ADANIENT", "name": "Adani Enterprises"},
-  "3787": {"symbol": "SUNPHARMA", "name": "Sun Pharma"},
-  "4306": {"symbol": "ULTRACEMCO", "name": "UltraTech Cement"},
-  "5258": {"symbol": "LT", "name": "Larsen & Toubro"},
-  "NIFTY": {"symbol": "NIFTY", "name": "Nifty 50 Index"},
-  "BANKNIFTY": {"symbol": "BANKNIFTY", "name": "Bank Nifty Index"},
-  "FINNIFTY": {"symbol": "FINNIFTY", "name": "Fin Nifty Index"},
-  "MIDCPNIFTY": {"symbol": "MIDCPNIFTY", "name": "Midcap Nifty Index"},
-  "SENSEX": {"symbol": "SENSEX", "name": "BSE Sensex"}
+  "_comment_indices": "=== INDICES (NSE/BSE benchmark indices — tracking only, not tradeable directly) ===",
+
+  "NIFTY": {
+    "symbol": "NIFTY 50",
+    "name": "Nifty 50 Index",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Index",
+    "category": "Index"
+  },
+  "BANKNIFTY": {
+    "symbol": "BANK NIFTY",
+    "name": "Bank Nifty Index",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Index",
+    "category": "Index"
+  },
+  "FINNIFTY": {
+    "symbol": "FIN NIFTY",
+    "name": "Nifty Financial Services Index",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Index",
+    "category": "Index"
+  },
+  "SENSEX": {
+    "symbol": "SENSEX",
+    "name": "BSE Sensex",
+    "exchange": "BSE",
+    "segment": "CASH",
+    "type": "Index",
+    "category": "Index"
+  },
+
+  "_comment_largecap_banks": "=== LARGE CAP — Banks & Financial Services ===",
+
+  "2885": {
+    "symbol": "RELIANCE",
+    "name": "Reliance Industries",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1333": {
+    "symbol": "HDFCBANK",
+    "name": "HDFC Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "4963": {
+    "symbol": "ICICIBANK",
+    "name": "ICICI Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "3045": {
+    "symbol": "SBIN",
+    "name": "State Bank of India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1922": {
+    "symbol": "KOTAKBANK",
+    "name": "Kotak Mahindra Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "5900": {
+    "symbol": "AXISBANK",
+    "name": "Axis Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "317": {
+    "symbol": "BAJFINANCE",
+    "name": "Bajaj Finance",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "16675": {
+    "symbol": "BAJAJFINSV",
+    "name": "Bajaj Finserv",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_it": "=== LARGE CAP — IT & Tech ===",
+
+  "11536": {
+    "symbol": "TCS",
+    "name": "Tata Consultancy Services",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1594": {
+    "symbol": "INFY",
+    "name": "Infosys",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "7229": {
+    "symbol": "HCLTECH",
+    "name": "HCL Technologies",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "3787": {
+    "symbol": "WIPRO",
+    "name": "Wipro",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "13538": {
+    "symbol": "TECHM",
+    "name": "Tech Mahindra",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_energy": "=== LARGE CAP — Energy & Oil ===",
+
+  "2475": {
+    "symbol": "ONGC",
+    "name": "Oil & Natural Gas Corp",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "11630": {
+    "symbol": "NTPC",
+    "name": "NTPC Limited",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "14977": {
+    "symbol": "POWERGRID",
+    "name": "Power Grid Corporation",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "526": {
+    "symbol": "BPCL",
+    "name": "Bharat Petroleum",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1624": {
+    "symbol": "IOC",
+    "name": "Indian Oil Corporation",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "4717": {
+    "symbol": "GAIL",
+    "name": "GAIL India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_fmcg": "=== LARGE CAP — FMCG & Consumer ===",
+
+  "1394": {
+    "symbol": "HINDUNILVR",
+    "name": "Hindustan Unilever",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1660": {
+    "symbol": "ITC",
+    "name": "ITC Limited",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "547": {
+    "symbol": "BRITANNIA",
+    "name": "Britannia Industries",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "17963": {
+    "symbol": "NESTLEIND",
+    "name": "Nestle India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "3432": {
+    "symbol": "TATACONSUM",
+    "name": "Tata Consumer Products",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_auto": "=== LARGE CAP — Auto ===",
+
+  "10999": {
+    "symbol": "MARUTI",
+    "name": "Maruti Suzuki",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "2031": {
+    "symbol": "M&M",
+    "name": "Mahindra & Mahindra",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "16669": {
+    "symbol": "BAJAJ-AUTO",
+    "name": "Bajaj Auto",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1348": {
+    "symbol": "HEROMOTOCO",
+    "name": "Hero MotoCorp",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "910": {
+    "symbol": "EICHERMOT",
+    "name": "Eicher Motors (Royal Enfield)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "3456": {
+    "symbol": "TMPV",
+    "name": "Tata Motors Passenger Vehicles",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_infra": "=== LARGE CAP — Infrastructure & Industrial ===",
+
+  "11483": {
+    "symbol": "LT",
+    "name": "Larsen & Toubro",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "11532": {
+    "symbol": "ULTRACEMCO",
+    "name": "UltraTech Cement",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1232": {
+    "symbol": "GRASIM",
+    "name": "Grasim Industries",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "15083": {
+    "symbol": "ADANIPORTS",
+    "name": "Adani Ports & SEZ",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "25": {
+    "symbol": "ADANIENT",
+    "name": "Adani Enterprises",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_pharma": "=== LARGE CAP — Pharma & Healthcare ===",
+
+  "3351": {
+    "symbol": "SUNPHARMA",
+    "name": "Sun Pharma Industries",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "881": {
+    "symbol": "DRREDDY",
+    "name": "Dr Reddy's Laboratories",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "694": {
+    "symbol": "CIPLA",
+    "name": "Cipla",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "157": {
+    "symbol": "APOLLOHOSP",
+    "name": "Apollo Hospitals",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "10940": {
+    "symbol": "DIVISLAB",
+    "name": "Divi's Laboratories",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_metals": "=== LARGE CAP — Metals & Mining ===",
+
+  "11723": {
+    "symbol": "JSWSTEEL",
+    "name": "JSW Steel",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "3499": {
+    "symbol": "TATASTEEL",
+    "name": "Tata Steel",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "1363": {
+    "symbol": "HINDALCO",
+    "name": "Hindalco Industries",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "20374": {
+    "symbol": "COALINDIA",
+    "name": "Coal India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_largecap_other": "=== LARGE CAP — Telecom, Retail, Insurance ===",
+
+  "10604": {
+    "symbol": "BHARTIARTL",
+    "name": "Bharti Airtel",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "3506": {
+    "symbol": "TITAN",
+    "name": "Titan Company",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "236": {
+    "symbol": "ASIANPAINT",
+    "name": "Asian Paints",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "467": {
+    "symbol": "HDFCLIFE",
+    "name": "HDFC Life Insurance",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+  "21808": {
+    "symbol": "SBILIFE",
+    "name": "SBI Life Insurance",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Large Cap"
+  },
+
+  "_comment_midcap_popular": "=== MID CAP — Retail Favourites (high volume, popular with traders) ===",
+
+  "3426": {
+    "symbol": "TATAPOWER",
+    "name": "Tata Power",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "12018": {
+    "symbol": "SUZLON",
+    "name": "Suzlon Energy",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "11915": {
+    "symbol": "YESBANK",
+    "name": "Yes Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "2029": {
+    "symbol": "IRFC",
+    "name": "Indian Railway Finance Corp",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "20261": {
+    "symbol": "IREDA",
+    "name": "Indian Renewable Energy Dev",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "383": {
+    "symbol": "BEL",
+    "name": "Bharat Electronics",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "2303": {
+    "symbol": "HAL",
+    "name": "Hindustan Aeronautics",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "1964": {
+    "symbol": "TRENT",
+    "name": "Trent (Zudio, Westside)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "5097": {
+    "symbol": "ETERNAL",
+    "name": "Eternal (Zomato)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "18143": {
+    "symbol": "JIOFIN",
+    "name": "Jio Financial Services",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "5258": {
+    "symbol": "INDUSINDBK",
+    "name": "IndusInd Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "17869": {
+    "symbol": "JSWENERGY",
+    "name": "JSW Energy",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "3563": {
+    "symbol": "ADANIGREEN",
+    "name": "Adani Green Energy",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "17388": {
+    "symbol": "ADANIPOWER",
+    "name": "Adani Power",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+
+  "_comment_midcap_defence": "=== MID CAP — Defence & Railways (trending sectors) ===",
+
+  "509": {
+    "symbol": "MAZDOCK",
+    "name": "Mazagon Dock Shipbuilders",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "21508": {
+    "symbol": "COCHINSHIP",
+    "name": "Cochin Shipyard",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "9552": {
+    "symbol": "RVNL",
+    "name": "Rail Vikas Nigam",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "4986": {
+    "symbol": "IRCON",
+    "name": "Ircon International",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "3761": {
+    "symbol": "RITES",
+    "name": "RITES Limited",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+
+  "_comment_midcap_tech": "=== MID CAP — IT & Electronics ===",
+
+  "21690": {
+    "symbol": "DIXON",
+    "name": "Dixon Technologies",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "3411": {
+    "symbol": "TATAELXSI",
+    "name": "Tata Elxsi",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "18365": {
+    "symbol": "PERSISTENT",
+    "name": "Persistent Systems",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "11543": {
+    "symbol": "COFORGE",
+    "name": "Coforge",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "4503": {
+    "symbol": "MPHASIS",
+    "name": "Mphasis",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "12092": {
+    "symbol": "KAYNES",
+    "name": "Kaynes Technology",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+
+  "_comment_midcap_industrial": "=== MID CAP — Industrial & Capital Goods ===",
+
+  "9590": {
+    "symbol": "POLYCAB",
+    "name": "Polycab India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "3150": {
+    "symbol": "SIEMENS",
+    "name": "Siemens India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "13": {
+    "symbol": "ABB",
+    "name": "ABB India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "760": {
+    "symbol": "CGPOWER",
+    "name": "CG Power & Industrial",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "3475": {
+    "symbol": "THERMAX",
+    "name": "Thermax",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "1901": {
+    "symbol": "CUMMINSIND",
+    "name": "Cummins India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+
+  "_comment_midcap_finance": "=== MID CAP — NBFC & Finance ===",
+
+  "23650": {
+    "symbol": "MUTHOOTFIN",
+    "name": "Muthoot Finance",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "19061": {
+    "symbol": "MANAPPURAM",
+    "name": "Manappuram Finance",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "14299": {
+    "symbol": "PFC",
+    "name": "Power Finance Corporation",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+  "15355": {
+    "symbol": "RECLTD",
+    "name": "REC Limited",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Mid Cap"
+  },
+
+  "_comment_smallcap": "=== SMALL CAP — Retail Favourites (high volume, penny-ish, popular with beginners) ===",
+
+  "14366": {
+    "symbol": "IDEA",
+    "name": "Vodafone Idea",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "10666": {
+    "symbol": "PNB",
+    "name": "Punjab National Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "4668": {
+    "symbol": "BANKBARODA",
+    "name": "Bank of Baroda",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "10794": {
+    "symbol": "CANBK",
+    "name": "Canara Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "11184": {
+    "symbol": "IDFCFIRSTB",
+    "name": "IDFC First Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "17400": {
+    "symbol": "NHPC",
+    "name": "NHPC Limited",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "15332": {
+    "symbol": "NMDC",
+    "name": "NMDC Limited",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "2963": {
+    "symbol": "SAIL",
+    "name": "Steel Authority of India",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "438": {
+    "symbol": "BHEL",
+    "name": "Bharat Heavy Electricals",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "15259": {
+    "symbol": "RPOWER",
+    "name": "Reliance Power",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "24777": {
+    "symbol": "OLAELEC",
+    "name": "Ola Electric Mobility",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "13611": {
+    "symbol": "IRCTC",
+    "name": "IRCTC",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "6705": {
+    "symbol": "PAYTM",
+    "name": "Paytm (One97 Communications)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "6545": {
+    "symbol": "NYKAA",
+    "name": "Nykaa (FSN E-Commerce)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "19913": {
+    "symbol": "DMART",
+    "name": "Avenue Supermarts (DMart)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "3063": {
+    "symbol": "VEDL",
+    "name": "Vedanta",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "10637": {
+    "symbol": "OLECTRA",
+    "name": "Olectra Greentech (EV buses)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "1023": {
+    "symbol": "FEDERALBNK",
+    "name": "Federal Bank",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "10440": {
+    "symbol": "LUPIN",
+    "name": "Lupin Pharma",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "7929": {
+    "symbol": "ZYDUSLIFE",
+    "name": "Zydus Lifesciences",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "6656": {
+    "symbol": "POLICYBZR",
+    "name": "PolicyBazaar (PB Fintech)",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "4204": {
+    "symbol": "MOTHERSON",
+    "name": "Samvardhana Motherson",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  },
+  "18652": {
+    "symbol": "ICICIPRULI",
+    "name": "ICICI Prudential Life",
+    "exchange": "NSE",
+    "segment": "CASH",
+    "type": "Stock",
+    "category": "Small Cap"
+  }
 }

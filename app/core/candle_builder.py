@@ -166,6 +166,45 @@ class CandleBuilder:
         # Emit event
         self._event_bus.emit("candle", candle)
 
+    def inject_history(
+        self,
+        exchange_token: str,
+        timeframe: Timeframe,
+        candles: list[Candle],
+    ) -> None:
+        """
+        Pre-load historical candles into the history buffer.
+        Used by the warmup DataManager to seed indicators on startup.
+
+        Candles are inserted at the FRONT of existing history (oldest first).
+        Duplicates (by timestamp) are skipped.
+        """
+        if not candles:
+            return
+
+        key = (exchange_token, timeframe)
+        if key not in self._history:
+            self._history[key] = []
+
+        existing = self._history[key]
+        existing_timestamps = {c.timestamp_ms for c in existing}
+
+        # Filter out duplicates and prepend
+        new_candles = [c for c in candles if c.timestamp_ms not in existing_timestamps]
+        if new_candles:
+            self._history[key] = new_candles + existing
+            # Trim to max history
+            if len(self._history[key]) > self._max_history:
+                self._history[key] = self._history[key][-self._max_history:]
+
+        logger.info(
+            "Injected %d historical candles for %s/%s (total: %d)",
+            len(new_candles),
+            exchange_token,
+            timeframe.value,
+            len(self._history[key]),
+        )
+
     def get_history(
         self,
         exchange_token: str,

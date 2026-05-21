@@ -74,12 +74,19 @@ class Signal:
     timestamp_ms: float
     strategy_name: str
     reason: str = ""
+    stop_loss: float | None = None
+    take_profit: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __repr__(self) -> str:
+        sl_tp = ""
+        if self.stop_loss:
+            sl_tp += f" SL={self.stop_loss:.2f}"
+        if self.take_profit:
+            sl_tp += f" TP={self.take_profit:.2f}"
         return (
             f"Signal({self.signal_type.value} {self.exchange_token} "
-            f"@{self.price:.2f} by {self.strategy_name})"
+            f"@{self.price:.2f}{sl_tp} by {self.strategy_name})"
         )
 
 
@@ -117,16 +124,20 @@ class Position:
     exit_time_ms: float = 0.0
     pnl: float = 0.0
     pnl_pct: float = 0.0
+    close_reason: str = ""
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
 
     @property
     def is_open(self) -> bool:
         return self.status == PositionStatus.OPEN
 
-    def close(self, exit_price: float, exit_time_ms: float) -> None:
+    def close(self, exit_price: float, exit_time_ms: float, reason: str = "") -> None:
         """Close the position and calculate PnL."""
         self.exit_price = exit_price
         self.exit_time_ms = exit_time_ms
         self.status = PositionStatus.CLOSED
+        self.close_reason = reason
 
         if self.side == OrderSide.BUY:
             self.pnl = (self.exit_price - self.entry_price) * self.quantity

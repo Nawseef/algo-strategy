@@ -29,6 +29,23 @@ class BaseStrategy(ABC):
         """Unique strategy identifier."""
         ...
 
+    @property
+    def warmup_config(self) -> dict[str, int]:
+        """
+        Declare historical data warmup requirements.
+
+        Override in subclass to specify how many candles of each timeframe
+        the strategy needs pre-loaded on startup.
+
+        Returns:
+            Dict mapping timeframe string to number of candles needed.
+            Example: {"1m": 50, "1d": 200}
+
+        The DataManager will merge requirements from all strategies,
+        taking the maximum per timeframe, and fetch once.
+        """
+        return {}
+
     @abstractmethod
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
         """

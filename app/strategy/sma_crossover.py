@@ -47,6 +47,14 @@ class SMACrossoverStrategy(BaseStrategy):
     def name(self) -> str:
         return f"SMA_Crossover({self._fast_period}/{self._slow_period})"
 
+    @property
+    def warmup_config(self) -> dict[str, int]:
+        """
+        SMA crossover needs at least slow_period candles to compute.
+        Request a few extra for the crossover detection to have previous values.
+        """
+        return {"1m": self._slow_period + 5}
+
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
         """Evaluate SMA crossover on each completed candle."""
         # Filter instruments if configured
