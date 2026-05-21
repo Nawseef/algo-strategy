@@ -17,6 +17,7 @@ from datetime import datetime, time as dtime
 
 from app.core.models import Candle, Signal, SignalType, Timeframe
 from app.strategy.base import BaseStrategy
+from app.strategy.cpr_filter import CPRFilter
 from app.strategy.indicators import vwap
 from app.utils.logger import get_logger
 
@@ -51,12 +52,14 @@ class ORBStrategy(BaseStrategy):
         max_range_pct: float = 1.5,
         min_range_pct: float = 0.1,
         use_vwap_filter: bool = True,
+        cpr_filter: CPRFilter | None = None,
     ) -> None:
         self._instrument_tokens = instrument_tokens or []
         self._rr_ratio = rr_ratio
         self._max_range_pct = max_range_pct
         self._min_range_pct = min_range_pct
         self._use_vwap_filter = use_vwap_filter
+        self._cpr_filter = cpr_filter
 
         # Per-instrument daily state (reset each day)
         self._range_high: dict[str, float] = {}
@@ -173,6 +176,11 @@ class ORBStrategy(BaseStrategy):
             and has_volume
             and vwap_ok_long
         ):
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.BUY, candle.close):
+                logger.debug("ORB LONG on %s blocked by CPR (bearish day)", token)
+                return None
+
             self._long_taken[token] = True
             entry = candle.close
             sl = range_low
@@ -210,6 +218,11 @@ class ORBStrategy(BaseStrategy):
             and has_volume
             and vwap_ok_short
         ):
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.SELL, candle.close):
+                logger.debug("ORB SHORT on %s blocked by CPR (bullish day)", token)
+                return None
+
             self._short_taken[token] = True
             entry = candle.close
             sl = range_high

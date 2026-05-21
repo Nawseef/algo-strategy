@@ -17,6 +17,7 @@ from datetime import datetime, time as dtime
 
 from app.core.models import Candle, Signal, SignalType, Timeframe
 from app.strategy.base import BaseStrategy
+from app.strategy.cpr_filter import CPRFilter
 from app.strategy.indicators import adx, rsi, vwap
 from app.utils.logger import get_logger
 
@@ -58,6 +59,7 @@ class VWAPRSIStrategy(BaseStrategy):
         min_sl_pct: float = 0.3,
         rr_ratio: float = 2.0,
         max_trades_per_day: int = 2,
+        cpr_filter: CPRFilter | None = None,
     ) -> None:
         self._instrument_tokens = instrument_tokens or []
         self._rsi_period = rsi_period
@@ -67,6 +69,7 @@ class VWAPRSIStrategy(BaseStrategy):
         self._min_sl_pct = min_sl_pct
         self._rr_ratio = rr_ratio
         self._max_trades_per_day = max_trades_per_day
+        self._cpr_filter = cpr_filter
 
         # State tracking
         self._prev_rsi: dict[str, float] = {}  # token -> previous RSI value
@@ -149,6 +152,10 @@ class VWAPRSIStrategy(BaseStrategy):
             and prev_rsi_val < self._rsi_oversold
             and rsi_val >= self._rsi_oversold
         ):
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.BUY, candle.close):
+                return None
+
             entry = candle.close
             # SL at VWAP (if price falls below VWAP, thesis is broken)
             sl = vwap_val
@@ -190,6 +197,10 @@ class VWAPRSIStrategy(BaseStrategy):
             and prev_rsi_val > self._rsi_overbought
             and rsi_val <= self._rsi_overbought
         ):
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.SELL, candle.close):
+                return None
+
             entry = candle.close
             # SL at VWAP
             sl = vwap_val

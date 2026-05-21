@@ -235,7 +235,7 @@ class TelegramNotifier:
             f"Invested: Rs.{invested:,.2f}\n"
             f"Time: {datetime.now().strftime('%I:%M %p')}\n\n"
             f"Strategy: {position.strategy_name}\n\n"
-            f"Open positions: {len(self._paper_trader.open_positions) if self._paper_trader else '?'}"
+            f"Open positions: {self._get_total_open_count()}"
         )
         self._send(msg)
 
@@ -264,17 +264,38 @@ class TelegramNotifier:
         )
 
         # Running totals + streak + risk
-        if self._paper_trader:
+        if self._multi_trader:
+            # Get stats from the specific strategy's trader
+            trader = self._multi_trader.get_trader(position.strategy_name)
+            if trader:
+                total_pnl = trader.total_pnl
+                balance = self._starting_balance + total_pnl
+                closed = trader.closed_positions
+                wins = len([p for p in closed if p.pnl > 0])
+                losses = len([p for p in closed if p.pnl < 0])
+
+                streak = self._get_streak(closed)
+
+                msg += (
+                    f"{'- '*15}\n"
+                    f"{position.strategy_name} TODAY:\n"
+                    f"Balance: Rs.{balance:,.2f}\n"
+                    f"PnL: {'+' if total_pnl >= 0 else ''}Rs.{total_pnl:,.2f}\n"
+                    f"Trades: {len(closed)} (W:{wins} L:{losses})\n"
+                    f"Win rate: {(wins/len(closed)*100) if closed else 0:.0f}%\n"
+                )
+
+                if streak:
+                    msg += f"Streak: {streak}\n"
+
+        elif self._paper_trader:
             total_pnl = self._paper_trader.total_pnl
             balance = self._starting_balance + total_pnl
             closed = self._paper_trader.closed_positions
             wins = len([p for p in closed if p.pnl > 0])
             losses = len([p for p in closed if p.pnl < 0])
 
-            # Calculate current streak
             streak = self._get_streak(closed)
-
-            # Day loss percentage
             day_loss_pct = abs(total_pnl / self._starting_balance * 100) if total_pnl < 0 else 0
 
             msg += (
@@ -318,6 +339,15 @@ class TelegramNotifier:
             label = "wins" if streak_type == "W" else "losses"
             return f"{streak_count} {label} in a row"
         return ""
+
+    def _get_total_open_count(self) -> str:
+        """Get total open positions across all traders."""
+        if self._multi_trader:
+            total = sum(len(t.open_positions) for t in self._multi_trader.all_traders.values())
+            return str(total)
+        elif self._paper_trader:
+            return str(len(self._paper_trader.open_positions))
+        return "?"
 
     def _on_reconnect(self, info: dict) -> None:
         # Only alert on first reconnect attempt, not every retry
@@ -531,7 +561,14 @@ class TelegramNotifier:
             f"Trades: {self._trades_opened} opened, {self._trades_closed} closed\n"
         )
 
-        if self._paper_trader:
+        if self._multi_trader:
+            msg += "\n--- Final Standings ---\n"
+            for name, trader in self._multi_trader.all_traders.items():
+                pnl = trader.total_pnl
+                closed = len(trader.closed_positions)
+                pnl_str = f"{'+' if pnl >= 0 else ''}Rs.{pnl:,.0f}"
+                msg += f"{name}: {pnl_str} ({closed} trades)\n"
+        elif self._paper_trader:
             realized = self._paper_trader.total_pnl
             balance = self._starting_balance + realized
             msg += (

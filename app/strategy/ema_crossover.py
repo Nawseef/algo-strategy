@@ -18,6 +18,7 @@ from datetime import datetime, time as dtime
 
 from app.core.models import Candle, Signal, SignalType, Timeframe
 from app.strategy.base import BaseStrategy
+from app.strategy.cpr_filter import CPRFilter
 from app.strategy.indicators import adx, atr, ema, sma, vwap
 from app.utils.logger import get_logger
 
@@ -56,6 +57,7 @@ class EMACrossoverStrategy(BaseStrategy):
         volume_multiplier: float = 1.3,
         use_vwap_filter: bool = True,
         cooldown_candles: int = 5,
+        cpr_filter: CPRFilter | None = None,
     ) -> None:
         self._instrument_tokens = instrument_tokens or []
         self._fast_period = fast_period
@@ -67,6 +69,7 @@ class EMACrossoverStrategy(BaseStrategy):
         self._volume_mult = volume_multiplier
         self._use_vwap_filter = use_vwap_filter
         self._cooldown_candles = cooldown_candles
+        self._cpr_filter = cpr_filter
 
         # State
         self._prev_fast_ema: dict[str, float] = {}
@@ -182,6 +185,10 @@ class EMACrossoverStrategy(BaseStrategy):
         self._candles_since_signal[token] = 0
 
         if bullish_cross:
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.BUY, entry):
+                return None
+
             sl = entry - (self._sl_atr_mult * atr_val)
             tp = entry + (self._tp_atr_mult * atr_val)
 
@@ -212,6 +219,10 @@ class EMACrossoverStrategy(BaseStrategy):
             )
 
         if bearish_cross:
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.SELL, entry):
+                return None
+
             sl = entry + (self._sl_atr_mult * atr_val)
             tp = entry - (self._tp_atr_mult * atr_val)
 
