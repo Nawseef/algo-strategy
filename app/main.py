@@ -144,10 +144,16 @@ def _send_warmup_starting(telegram, config) -> None:
 def _send_sleep_notification(wake_time) -> None:
     """Send a telegram message that the bot is alive but sleeping until market open."""
     import json
-    import os
     import urllib.request
     import urllib.error
     from datetime import datetime
+    from pathlib import Path
+    from dotenv import load_dotenv
+    import os
+
+    # Ensure .env is loaded (config.py hasn't been imported yet at this point)
+    env_path = Path(__file__).parent.parent / ".env"
+    load_dotenv(env_path)
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
