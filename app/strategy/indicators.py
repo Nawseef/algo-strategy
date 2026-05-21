@@ -246,6 +246,122 @@ def adx(candles: list[Candle], period: int = 14) -> float | None:
     return adx_val
 
 
+def bollinger_bands(
+    candles: list[Candle],
+    period: int = 20,
+    std_dev: float = 2.0,
+) -> tuple[float, float, float] | None:
+    """
+    Bollinger Bands.
+
+    Returns:
+        (upper_band, middle_band, lower_band) or None if insufficient data.
+    """
+    if len(candles) < period:
+        return None
+
+    closes = [c.close for c in candles[-period:]]
+    middle = sum(closes) / period
+
+    # Standard deviation
+    variance = sum((c - middle) ** 2 for c in closes) / period
+    std = variance ** 0.5
+
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+
+    return (upper, middle, lower)
+
+
+def bb_width(candles: list[Candle], period: int = 20, std_dev: float = 2.0) -> float | None:
+    """
+    Bollinger Band Width = (Upper - Lower) / Middle.
+    Measures how compressed the bands are. Lower = tighter squeeze.
+    """
+    result = bollinger_bands(candles, period, std_dev)
+    if result is None:
+        return None
+    upper, middle, lower = result
+    if middle == 0:
+        return None
+    return (upper - lower) / middle
+
+
+def bb_width_series(
+    candles: list[Candle], period: int = 20, std_dev: float = 2.0, lookback: int = 20
+) -> list[float]:
+    """
+    Compute BB Width for the last `lookback` candles.
+    Returns list of width values (most recent last).
+    """
+    if len(candles) < period + lookback:
+        return []
+
+    widths: list[float] = []
+    for i in range(lookback):
+        end_idx = len(candles) - lookback + i + 1
+        subset = candles[:end_idx]
+        w = bb_width(subset, period, std_dev)
+        widths.append(w if w is not None else 0.0)
+
+    return widths
+
+
+def keltner_channels(
+    candles: list[Candle],
+    ema_period: int = 20,
+    atr_period: int = 10,
+    multiplier: float = 1.5,
+) -> tuple[float, float, float] | None:
+    """
+    Keltner Channels (used for TTM Squeeze detection).
+
+    Returns:
+        (upper_kc, middle_kc, lower_kc) or None.
+    """
+    if len(candles) < max(ema_period, atr_period + 1):
+        return None
+
+    closes = [c.close for c in candles]
+    middle = ema(closes, ema_period)
+    if middle is None:
+        return None
+
+    atr_val = atr(candles, atr_period)
+    if atr_val is None:
+        return None
+
+    upper = middle + multiplier * atr_val
+    lower = middle - multiplier * atr_val
+
+    return (upper, middle, lower)
+
+
+def is_squeeze(
+    candles: list[Candle],
+    bb_period: int = 20,
+    bb_std: float = 2.0,
+    kc_ema_period: int = 20,
+    kc_atr_period: int = 10,
+    kc_multiplier: float = 1.5,
+) -> bool | None:
+    """
+    TTM Squeeze detection: Bollinger Bands inside Keltner Channels.
+    Returns True if squeeze is active, False if not, None if insufficient data.
+    """
+    bb = bollinger_bands(candles, bb_period, bb_std)
+    kc = keltner_channels(candles, kc_ema_period, kc_atr_period, kc_multiplier)
+
+    if bb is None or kc is None:
+        return None
+
+    bb_upper, _, bb_lower = bb
+    kc_upper, _, kc_lower = kc
+
+    # Squeeze = BB inside KC
+    return bb_upper < kc_upper and bb_lower > kc_lower
+
+
 def supertrend(
     candles: list[Candle],
     atr_period: int = 10,

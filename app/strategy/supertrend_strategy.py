@@ -19,6 +19,7 @@ from datetime import datetime, time as dtime
 
 from app.core.models import Candle, Signal, SignalType, Timeframe
 from app.strategy.base import BaseStrategy
+from app.strategy.cpr_filter import CPRFilter
 from app.strategy.indicators import ema, supertrend_with_prev
 from app.utils.logger import get_logger
 
@@ -52,6 +53,7 @@ class SuperTrendStrategy(BaseStrategy):
         rr_ratio: float = 2.0,
         max_flips_in_window: int = 3,
         chop_window: int = 10,
+        cpr_filter: CPRFilter | None = None,
     ) -> None:
         self._instrument_tokens = instrument_tokens or []
         self._atr_period = atr_period
@@ -60,6 +62,7 @@ class SuperTrendStrategy(BaseStrategy):
         self._rr_ratio = rr_ratio
         self._max_flips = max_flips_in_window
         self._chop_window = chop_window
+        self._cpr_filter = cpr_filter
 
         # State: track recent SuperTrend directions for chop detection
         self._direction_history: dict[str, list[bool]] = {}
@@ -151,6 +154,11 @@ class SuperTrendStrategy(BaseStrategy):
                              token, entry, ema_val)
                 return None
 
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.BUY, entry):
+                logger.debug("SuperTrend LONG on %s blocked by CPR", token)
+                return None
+
             # SL at SuperTrend line (lower band)
             sl = current_st
             # Ensure SL is below entry
@@ -188,6 +196,11 @@ class SuperTrendStrategy(BaseStrategy):
             if entry > ema_val:
                 logger.debug("SuperTrend DOWN flip on %s rejected: price %.2f > EMA %.2f",
                              token, entry, ema_val)
+                return None
+
+            # CPR filter
+            if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.SELL, entry):
+                logger.debug("SuperTrend SHORT on %s blocked by CPR", token)
                 return None
 
             # SL at SuperTrend line (upper band)

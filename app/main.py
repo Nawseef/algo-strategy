@@ -27,6 +27,8 @@ from app.core.events import EventBus
 from app.core.models import Timeframe
 from app.db.store import TradeStore
 from app.paper_trader.multi_trader import MultiTraderManager
+from app.strategy.bb_squeeze import BBSqueezeStrategy
+from app.strategy.cpr_filter import CPRFilter
 from app.strategy.ema_crossover import EMACrossoverStrategy
 from app.strategy.engine import StrategyEngine
 from app.strategy.orb import ORBStrategy
@@ -183,6 +185,10 @@ def main() -> None:
     # ─── Strategy Engine (Phase 3) ───────────────────────────────
     strategy_engine = StrategyEngine(event_bus, candle_builder)
 
+    # ─── CPR Filter (shared across all strategies) ───────────────
+    cpr_filter = CPRFilter()
+    # CPR will be calculated from warmup data after warmup completes
+
     # Strategy 1: ORB (Opening Range Breakout)
     orb_strategy = ORBStrategy(
         instrument_tokens=config.instruments.exchange_tokens,
@@ -190,6 +196,7 @@ def main() -> None:
         max_range_pct=1.5,
         min_range_pct=0.1,
         use_vwap_filter=True,
+        cpr_filter=cpr_filter,
     )
     strategy_engine.register(orb_strategy)
 
@@ -203,6 +210,7 @@ def main() -> None:
         min_sl_pct=0.3,
         rr_ratio=2.0,
         max_trades_per_day=2,
+        cpr_filter=cpr_filter,
     )
     strategy_engine.register(vwap_rsi_strategy)
 
@@ -218,6 +226,7 @@ def main() -> None:
         volume_multiplier=1.3,
         use_vwap_filter=True,
         cooldown_candles=5,
+        cpr_filter=cpr_filter,
     )
     strategy_engine.register(ema_strategy)
 
@@ -230,10 +239,25 @@ def main() -> None:
         rr_ratio=2.0,
         max_flips_in_window=3,
         chop_window=10,
+        cpr_filter=cpr_filter,
     )
     strategy_engine.register(supertrend_strategy)
 
-    # Strategy 5: SMA Crossover (baseline comparison)
+    # Strategy 5: Bollinger Band Squeeze
+    bb_squeeze_strategy = BBSqueezeStrategy(
+        instrument_tokens=config.instruments.exchange_tokens,
+        bb_period=20,
+        bb_std=2.0,
+        min_squeeze_candles=5,
+        rr_ratio=1.5,
+        volume_multiplier=1.5,
+        use_vwap_filter=True,
+        max_trades_per_day=2,
+        cpr_filter=cpr_filter,
+    )
+    strategy_engine.register(bb_squeeze_strategy)
+
+    # Strategy 6: SMA Crossover (baseline comparison)
     sma_strategy = SMACrossoverStrategy(
         fast_period=config.strategy.sma_fast_period,
         slow_period=config.strategy.sma_slow_period,
@@ -298,6 +322,18 @@ def main() -> None:
 
     # Start strategy engine (after warmup so indicators have context)
     strategy_engine.start()
+
+    # ─── Calculate CPR from warmup data ──────────────────────────
+    # CPR needs previous day's H/L/C — get from candle builder history
+    if config.instruments.exchange_tokens:
+        first_token = config.instruments.exchange_tokens[0]
+        from app.core.models import Timeframe as TF
+        history_5m = candle_builder.get_history(first_token, TF.M5)
+        if history_5m:
+            cpr_filter.calculate_from_5m_candles(history_5m)
+            logger.info("CPR bias: %s | Market type: %s", cpr_filter.bias.value, cpr_filter.market_type.value)
+        else:
+            logger.info("CPR: No historical data available, using neutral bias")
 
     # ─── Start Multi-Trader & Telegram ───────────────────────────
     multi_trader.start()
