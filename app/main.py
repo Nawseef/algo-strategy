@@ -17,6 +17,7 @@ Usage:
 
 import signal
 import sys
+import time
 
 from app.analytics.engine import AnalyticsEngine
 from app.broker.base import Instrument, Tick
@@ -39,9 +40,13 @@ from app.telegram.notifier import TelegramNotifier
 from app.utils.config import load_config
 from app.utils.instruments import get_instrument_map
 from app.utils.logger import get_logger
+from app.utils.market_hours import is_within_active_window, seconds_until_market_open
 from app.warmup import DataManager
 
 logger = get_logger("main")
+
+# Flag for graceful shutdown during sleep
+_shutdown_requested = False
 
 # Map string timeframe codes to Timeframe enum
 TIMEFRAME_MAP: dict[str, Timeframe] = {
@@ -138,9 +143,55 @@ def _send_warmup_starting(telegram, config) -> None:
 
 def main() -> None:
     """Main execution flow — full pipeline."""
+    global _shutdown_requested
+
     logger.info("=" * 60)
     logger.info("ALGO-STRATEGY PLATFORM — MULTI-TRADER MODE")
     logger.info("=" * 60)
+
+    # ─── Market Hours Guard ──────────────────────────────────────
+    # If outside active window (9:05 AM - 3:30 PM on trading days),
+    # sleep until next market open to avoid crash-restart loops.
+    def _sleep_shutdown_handler(signum, frame):
+        global _shutdown_requested
+        _shutdown_requested = True
+        logger.info("Shutdown signal received during sleep. Exiting.")
+        sys.exit(0)
+
+    if not is_within_active_window():
+        sleep_seconds = seconds_until_market_open()
+        if sleep_seconds > 0:
+            from datetime import datetime, timedelta
+            import socket
+            wake_time = datetime.now() + timedelta(seconds=sleep_seconds)
+            logger.info(
+                "Market closed. Sleeping until %s (%.1f hours)...",
+                wake_time.strftime("%Y-%m-%d %I:%M %p"),
+                sleep_seconds / 3600,
+            )
+            # Handle SIGTERM during sleep so systemctl stop works
+            signal.signal(signal.SIGINT, _sleep_shutdown_handler)
+            signal.signal(signal.SIGTERM, _sleep_shutdown_handler)
+            # Sleep in 60s chunks so signals are handled promptly
+            # Every 5 minutes, do a tiny network ping to prevent Oracle Cloud
+            # from flagging the instance as idle and reclaiming it.
+            keepalive_interval = 300  # 5 minutes
+            since_last_keepalive = 0.0
+            while sleep_seconds > 0 and not _shutdown_requested:
+                chunk = min(sleep_seconds, 60)
+                time.sleep(chunk)
+                sleep_seconds -= chunk
+                since_last_keepalive += chunk
+                if since_last_keepalive >= keepalive_interval:
+                    since_last_keepalive = 0.0
+                    try:
+                        # Minimal DNS lookup to generate network activity
+                        socket.getaddrinfo("api.groww.in", 443)
+                    except Exception:
+                        pass
+            if _shutdown_requested:
+                sys.exit(0)
+            logger.info("Waking up — market is about to open!")
 
     # ─── Configuration ───────────────────────────────────────────
     config = load_config()
