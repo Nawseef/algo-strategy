@@ -101,44 +101,43 @@ class PaperTradingEngine:
         self._log_summary()
 
     def on_tick(self, tick: Tick) -> None:
-        """Track latest prices for position valuation."""
+        """Track latest prices and check SL/TP for open positions."""
         self._latest_prices[tick.exchange_token] = tick.ltp
+
+        # Check SL/TP for all open positions on this instrument
+        if self._running:
+            self._check_sl_tp(tick)
 
     def on_signal(self, signal: Signal) -> None:
         """
         Process a trading signal.
-        Respects market hours, cooldown, and position limits.
+        Respects market hours and position limits.
+        Cooldown and opposing-signal close are configurable.
         """
         if not self._running:
             return
 
-        # Duplicate signal suppression (cooldown)
-        import time as _time
-        now = _time.time()
-        last = self._last_signal_time.get(signal.exchange_token, 0)
-        if now - last < self._signal_cooldown:
-            logger.debug("Signal cooldown active for %s, skipping", signal.exchange_token)
-            return
-        self._last_signal_time[signal.exchange_token] = now
+        # Duplicate signal suppression (cooldown) — disabled when cooldown=0
+        if self._signal_cooldown > 0:
+            import time as _time
+            now = _time.time()
+            last = self._last_signal_time.get(signal.exchange_token, 0)
+            if now - last < self._signal_cooldown:
+                logger.debug("Signal cooldown active for %s, skipping", signal.exchange_token)
+                return
+            self._last_signal_time[signal.exchange_token] = now
 
         logger.info("Processing signal: %s", signal)
 
         # Apply slippage to signal price
         execution_price = self._apply_slippage(signal.price, signal.signal_type)
 
-        # Check if we have an opposing open position to close
-        # (closing is always allowed, even near market close)
-        existing = self._find_opposing_position(signal)
-        if existing:
-            self._close_position(existing, execution_price, signal.timestamp_ms)
-            return
-
         # No new positions after 3:15 PM
         if not can_open_new_position():
             logger.info("Market closing soon — not opening new position")
             return
 
-        # Check position limits
+        # Check position limits (only if max_open_positions > 0)
         if not self._can_open_position(signal):
             logger.warning(
                 "Cannot open position: limit reached (%d open)",
@@ -148,6 +147,44 @@ class PaperTradingEngine:
 
         # Open new position at slipped price
         self._open_position(signal, execution_price)
+
+    def _check_sl_tp(self, tick: Tick) -> None:
+        """Check stop-loss and take-profit levels for open positions."""
+        for pos in list(self.open_positions):
+            if pos.exchange_token != tick.exchange_token:
+                continue
+
+            price = tick.ltp
+
+            # Check Stop Loss
+            if pos.stop_loss > 0:
+                if pos.side == OrderSide.BUY and price <= pos.stop_loss:
+                    self._close_position(
+                        pos, pos.stop_loss, tick.timestamp_ms,
+                        reason=f"Stop-loss hit @ {pos.stop_loss:.2f}"
+                    )
+                    continue
+                elif pos.side == OrderSide.SELL and price >= pos.stop_loss:
+                    self._close_position(
+                        pos, pos.stop_loss, tick.timestamp_ms,
+                        reason=f"Stop-loss hit @ {pos.stop_loss:.2f}"
+                    )
+                    continue
+
+            # Check Take Profit
+            if pos.take_profit > 0:
+                if pos.side == OrderSide.BUY and price >= pos.take_profit:
+                    self._close_position(
+                        pos, pos.take_profit, tick.timestamp_ms,
+                        reason=f"Take-profit hit @ {pos.take_profit:.2f}"
+                    )
+                    continue
+                elif pos.side == OrderSide.SELL and price <= pos.take_profit:
+                    self._close_position(
+                        pos, pos.take_profit, tick.timestamp_ms,
+                        reason=f"Take-profit hit @ {pos.take_profit:.2f}"
+                    )
+                    continue
 
     def _find_opposing_position(self, signal: Signal) -> Position | None:
         """Find an open position that opposes this signal (to close it)."""
@@ -219,7 +256,7 @@ class PaperTradingEngine:
         )
         self._orders.append(order)
 
-        # Create position
+        # Create position with SL/TP from signal
         position = Position(
             position_id=position_id,
             exchange=signal.exchange,
@@ -230,15 +267,24 @@ class PaperTradingEngine:
             entry_price=execution_price,
             entry_time_ms=signal.timestamp_ms,
             strategy_name=signal.strategy_name,
+            stop_loss=signal.stop_loss or 0.0,
+            take_profit=signal.take_profit or 0.0,
         )
         self._positions.append(position)
 
+        sl_tp_info = ""
+        if position.stop_loss > 0:
+            sl_tp_info += f" SL={position.stop_loss:.2f}"
+        if position.take_profit > 0:
+            sl_tp_info += f" TP={position.take_profit:.2f}"
+
         logger.info(
-            "POSITION OPENED | %s %s qty=%d @%.2f | strategy=%s | reason=%s",
+            "POSITION OPENED | %s %s qty=%d @%.2f%s | strategy=%s | reason=%s",
             side.value,
             signal.exchange_token,
             quantity,
             execution_price,
+            sl_tp_info,
             signal.strategy_name,
             signal.reason,
         )
@@ -248,10 +294,10 @@ class PaperTradingEngine:
         self._event_bus.emit("position_open", position)
 
     def _close_position(
-        self, position: Position, exit_price: float, exit_time_ms: float
+        self, position: Position, exit_price: float, exit_time_ms: float, reason: str = ""
     ) -> None:
         """Close an existing position with brokerage deduction."""
-        position.close(exit_price, exit_time_ms)
+        position.close(exit_price, exit_time_ms, reason=reason)
 
         # Deduct brokerage from PnL
         position.pnl = self._apply_brokerage(
@@ -413,9 +459,9 @@ class PaperTradingEngine:
             for pos in list(self.open_positions):
                 current_price = self._latest_prices.get(pos.exchange_token)
                 if current_price:
-                    self._close_position(pos, current_price, now_ms)
+                    self._close_position(pos, current_price, now_ms, reason="Auto square-off (market closing at 3:20 PM)")
                 else:
                     # Use entry price if no current price (shouldn't happen)
-                    self._close_position(pos, pos.entry_price, now_ms)
+                    self._close_position(pos, pos.entry_price, now_ms, reason="Auto square-off (market closing, no live price)")
 
         self._start_square_off_timer()

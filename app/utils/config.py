@@ -37,10 +37,20 @@ class StrategyConfig:
     """Strategy engine configuration."""
 
     # Candle timeframes to build (comma-separated: 1m,5m,15m)
-    timeframes: list[str] = field(default_factory=lambda: _parse_list("CANDLE_TIMEFRAMES", "1m"))
+    timeframes: list[str] = field(default_factory=lambda: _parse_list("CANDLE_TIMEFRAMES", "1m,5m"))
     # SMA crossover parameters
     sma_fast_period: int = field(default_factory=lambda: int(os.getenv("SMA_FAST_PERIOD", "5")))
     sma_slow_period: int = field(default_factory=lambda: int(os.getenv("SMA_SLOW_PERIOD", "20")))
+    # ORB parameters
+    orb_rr_ratio: float = field(default_factory=lambda: float(os.getenv("ORB_RR_RATIO", "1.5")))
+    orb_max_range_pct: float = field(default_factory=lambda: float(os.getenv("ORB_MAX_RANGE_PCT", "1.5")))
+    # EMA Crossover parameters
+    ema_fast_period: int = field(default_factory=lambda: int(os.getenv("EMA_FAST_PERIOD", "9")))
+    ema_slow_period: int = field(default_factory=lambda: int(os.getenv("EMA_SLOW_PERIOD", "21")))
+    ema_adx_threshold: float = field(default_factory=lambda: float(os.getenv("EMA_ADX_THRESHOLD", "25")))
+    # SuperTrend parameters
+    supertrend_atr_period: int = field(default_factory=lambda: int(os.getenv("SUPERTREND_ATR_PERIOD", "10")))
+    supertrend_multiplier: float = field(default_factory=lambda: float(os.getenv("SUPERTREND_MULTIPLIER", "3.0")))
 
 
 @dataclass
@@ -74,6 +84,21 @@ class ReconnectConfig:
     max_retries: int = field(default_factory=lambda: int(os.getenv("RECONNECT_MAX_RETRIES", "0")))
 
 
+@dataclass
+class WarmupConfig:
+    """Historical data warmup configuration."""
+
+    enabled: bool = field(default_factory=lambda: os.getenv("WARMUP_ENABLED", "true").lower() == "true")
+    # Max concurrent API requests during warmup
+    concurrency: int = field(default_factory=lambda: int(os.getenv("WARMUP_CONCURRENCY", "3")))
+    # Delay between requests in milliseconds (rate limit protection)
+    delay_ms: int = field(default_factory=lambda: int(os.getenv("WARMUP_DELAY_MS", "200")))
+    # Max retries per failed request
+    max_retries: int = field(default_factory=lambda: int(os.getenv("WARMUP_MAX_RETRIES", "3")))
+    # Base backoff in seconds for retries (doubles each attempt)
+    retry_backoff_base: float = field(default_factory=lambda: float(os.getenv("WARMUP_RETRY_BACKOFF", "1.0")))
+
+
 def _parse_instruments() -> list[str]:
     raw = os.getenv("SUBSCRIBE_INSTRUMENTS", "")
     return [t.strip() for t in raw.split(",") if t.strip()]
@@ -94,6 +119,7 @@ class AppConfig:
     paper_trading: PaperTradingConfig = field(default_factory=PaperTradingConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     reconnect: ReconnectConfig = field(default_factory=ReconnectConfig)
+    warmup: WarmupConfig = field(default_factory=WarmupConfig)
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
 
