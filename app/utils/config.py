@@ -69,7 +69,7 @@ class TelegramConfig:
     """Telegram notification configuration."""
 
     bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
-    chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+    chat_ids: list[str] = field(default_factory=lambda: _parse_list("TELEGRAM_CHAT_ID", ""))
     summary_interval_minutes: int = field(default_factory=lambda: int(os.getenv("TELEGRAM_SUMMARY_INTERVAL", "30")))
     notify_signals: bool = field(default_factory=lambda: os.getenv("TELEGRAM_NOTIFY_SIGNALS", "true").lower() == "true")
     notify_positions: bool = field(default_factory=lambda: os.getenv("TELEGRAM_NOTIFY_POSITIONS", "true").lower() == "true")

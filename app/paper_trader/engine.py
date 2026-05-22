@@ -101,8 +101,25 @@ class PaperTradingEngine:
         self._log_summary()
 
     def on_tick(self, tick: Tick) -> None:
-        """Track latest prices and check SL/TP for open positions."""
+        """Track latest prices, update MFE/MAE, and check SL/TP for open positions."""
         self._latest_prices[tick.exchange_token] = tick.ltp
+
+        # Update max favorable/adverse excursion for open positions
+        for pos in self.open_positions:
+            if pos.exchange_token != tick.exchange_token:
+                continue
+            if pos.side == OrderSide.BUY:
+                # Long: favorable = price going UP, adverse = price going DOWN
+                if tick.ltp > pos.max_favorable_price:
+                    pos.max_favorable_price = tick.ltp
+                if pos.max_adverse_price == 0 or tick.ltp < pos.max_adverse_price:
+                    pos.max_adverse_price = tick.ltp
+            else:
+                # Short: favorable = price going DOWN, adverse = price going UP
+                if pos.max_favorable_price == 0 or tick.ltp < pos.max_favorable_price:
+                    pos.max_favorable_price = tick.ltp
+                if tick.ltp > pos.max_adverse_price:
+                    pos.max_adverse_price = tick.ltp
 
         # Check SL/TP for all open positions on this instrument
         if self._running:
@@ -210,15 +227,33 @@ class PaperTradingEngine:
             if len(self.open_positions) >= self._max_open_positions:
                 return False
 
-        # Check if we already have a same-direction position for this instrument
+        # Block same-direction duplicate on same instrument from same strategy
+        # This prevents re-entry when price oscillates and triggers the same signal again
+        side = OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL
+        for pos in self._positions:
+            if not pos.is_open:
+                continue
+            if pos.exchange_token != signal.exchange_token:
+                continue
+            if pos.strategy_name != signal.strategy_name:
+                continue
+            # Same strategy, same instrument, same direction already open
+            if pos.side == side:
+                logger.debug(
+                    "Already have %s position for %s from %s, skipping duplicate",
+                    side.value,
+                    signal.exchange_token,
+                    signal.strategy_name,
+                )
+                return False
+
+        # Additional check for non-multiple mode (legacy behavior)
         if not self._allow_multiple:
             for pos in self._positions:
                 if not pos.is_open:
                     continue
                 if pos.exchange_token != signal.exchange_token:
                     continue
-                # Same direction already open
-                side = OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL
                 if pos.side == side:
                     logger.debug(
                         "Already have %s position for %s, skipping",
@@ -269,6 +304,8 @@ class PaperTradingEngine:
             strategy_name=signal.strategy_name,
             stop_loss=signal.stop_loss or 0.0,
             take_profit=signal.take_profit or 0.0,
+            max_favorable_price=execution_price,
+            max_adverse_price=execution_price,
         )
         self._positions.append(position)
 

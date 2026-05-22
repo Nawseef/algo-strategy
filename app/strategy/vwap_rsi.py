@@ -59,6 +59,7 @@ class VWAPRSIStrategy(BaseStrategy):
         min_sl_pct: float = 0.3,
         rr_ratio: float = 2.0,
         max_trades_per_day: int = 2,
+        cooldown_candles: int = 6,
         cpr_filter: CPRFilter | None = None,
     ) -> None:
         self._instrument_tokens = instrument_tokens or []
@@ -69,11 +70,13 @@ class VWAPRSIStrategy(BaseStrategy):
         self._min_sl_pct = min_sl_pct
         self._rr_ratio = rr_ratio
         self._max_trades_per_day = max_trades_per_day
+        self._cooldown_candles = cooldown_candles
         self._cpr_filter = cpr_filter
 
         # State tracking
         self._prev_rsi: dict[str, float] = {}  # token -> previous RSI value
         self._trades_today: dict[str, int] = {}  # token -> count
+        self._candles_since_signal: dict[str, int] = {}  # token -> candles since last signal
         self._last_reset_date: str = ""
 
     @property
@@ -84,7 +87,7 @@ class VWAPRSIStrategy(BaseStrategy):
     def warmup_config(self) -> dict[str, int]:
         # Need enough 5m candles for RSI(14) + ADX(14) to stabilize
         # RSI needs 15 candles, ADX needs 29 candles
-        return {"5m": 35}
+        return {"5m": 50}
 
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
         """Evaluate VWAP + RSI pullback on each 5-min candle."""
@@ -104,8 +107,17 @@ class VWAPRSIStrategy(BaseStrategy):
 
         token = candle.exchange_token
 
+        # Increment cooldown counter
+        if token in self._candles_since_signal:
+            self._candles_since_signal[token] += 1
+
         # Check daily trade limit
         if self._trades_today.get(token, 0) >= self._max_trades_per_day:
+            return None
+
+        # Cooldown check — prevent re-entry on same oscillation
+        candles_since = self._candles_since_signal.get(token, self._cooldown_candles + 1)
+        if candles_since < self._cooldown_candles:
             return None
 
         # Need enough history
@@ -238,6 +250,7 @@ class VWAPRSIStrategy(BaseStrategy):
 
         if signal:
             self._trades_today[token] = self._trades_today.get(token, 0) + 1
+            self._candles_since_signal[token] = 0  # Reset cooldown
 
         return signal
 
@@ -261,5 +274,6 @@ class VWAPRSIStrategy(BaseStrategy):
         if today != self._last_reset_date:
             self._trades_today.clear()
             self._prev_rsi.clear()
+            self._candles_since_signal.clear()
             self._last_reset_date = today
             logger.info("VWAP_RSI daily state reset for %s", today)

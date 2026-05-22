@@ -43,7 +43,7 @@ class TelegramNotifier:
         self,
         event_bus: EventBus,
         bot_token: str,
-        chat_id: str,
+        chat_ids: list[str],
         paper_trader=None,
         starting_balance: float = 100000.0,
         summary_interval_minutes: int = 30,
@@ -55,7 +55,7 @@ class TelegramNotifier:
     ) -> None:
         self._event_bus = event_bus
         self._bot_token = bot_token
-        self._chat_id = chat_id
+        self._chat_ids = [cid for cid in chat_ids if cid]
         self._paper_trader = paper_trader
         self._multi_trader = multi_trader
         self._starting_balance = starting_balance
@@ -64,7 +64,7 @@ class TelegramNotifier:
         self._notify_positions = notify_positions
         self._notify_reconnects = notify_reconnects
         self._notify_errors = notify_errors
-        self._enabled = bool(bot_token and chat_id)
+        self._enabled = bool(bot_token and self._chat_ids)
 
         # Timers
         self._summary_timer: threading.Timer | None = None
@@ -250,6 +250,31 @@ class TelegramNotifier:
         hold_ms = position.exit_time_ms - position.entry_time_ms
         hold_min = hold_ms / 60_000 if hold_ms > 0 else 0
 
+        # Max Favorable Excursion (MFE) analysis
+        mfe_info = ""
+        if position.max_favorable_price > 0:
+            entry = position.entry_price
+            if position.side.value == "BUY":
+                peak = position.max_favorable_price
+                peak_profit = (peak - entry) * position.quantity
+                mfe_info += f"Peak: Rs.{peak:,.2f} (+Rs.{peak_profit:,.2f})\n"
+                if position.take_profit > 0:
+                    missed_tp_by = position.take_profit - peak
+                    if missed_tp_by > 0:
+                        mfe_info += f"Missed TP by: Rs.{missed_tp_by:,.2f}\n"
+                    else:
+                        mfe_info += f"Reached beyond TP\n"
+            else:
+                trough = position.max_favorable_price
+                peak_profit = (entry - trough) * position.quantity
+                mfe_info += f"Peak: Rs.{trough:,.2f} (+Rs.{peak_profit:,.2f})\n"
+                if position.take_profit > 0:
+                    missed_tp_by = trough - position.take_profit
+                    if missed_tp_by > 0:
+                        mfe_info += f"Missed TP by: Rs.{missed_tp_by:,.2f}\n"
+                    else:
+                        mfe_info += f"Reached beyond TP\n"
+
         msg = (
             f"{'- '*15}\n"
             f"TRADE CLOSED - {result}\n"
@@ -258,6 +283,7 @@ class TelegramNotifier:
             f"Side: {position.side.value}\n"
             f"Entry: Rs.{position.entry_price:,.2f}\n"
             f"Exit: Rs.{position.exit_price:,.2f}\n"
+            f"{mfe_info}"
             f"Hold time: {hold_min:.0f} min\n\n"
             f"PnL: {emoji}Rs.{position.pnl:,.2f} ({emoji}{position.pnl_pct:.2f}%)\n\n"
             f"Why closed: {position.close_reason or 'Unknown'}\n"
@@ -588,26 +614,28 @@ class TelegramNotifier:
         self._send(text)
 
     def _send(self, text: str) -> None:
-        """Send a message via Telegram Bot API. Plain text, no markdown issues."""
+        """Send a message via Telegram Bot API to all configured chat IDs."""
         if not self._enabled:
             return
 
         url = TELEGRAM_API_URL.format(token=self._bot_token)
-        payload = json.dumps({
-            "chat_id": self._chat_id,
-            "text": text,
-            "disable_web_page_preview": True,
-        }).encode("utf-8")
 
-        try:
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status != 200:
-                    logger.warning("Telegram API returned %d", resp.status)
-        except Exception as e:
-            logger.error("Telegram send failed: %s", e)
+        for chat_id in self._chat_ids:
+            payload = json.dumps({
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            }).encode("utf-8")
+
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status != 200:
+                        logger.warning("Telegram API returned %d for chat %s", resp.status, chat_id)
+            except Exception as e:
+                logger.error("Telegram send failed for chat %s: %s", chat_id, e)

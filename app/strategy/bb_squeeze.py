@@ -79,7 +79,7 @@ class BBSqueezeStrategy(BaseStrategy):
     @property
     def warmup_config(self) -> dict[str, int]:
         # Need BB(20) + some buffer for squeeze detection
-        return {"5m": 30}
+        return {"5m": 50}
 
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
         """Evaluate BB Squeeze on each 5-min candle."""
