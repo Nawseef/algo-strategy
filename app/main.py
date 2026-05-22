@@ -150,9 +150,11 @@ def _send_sleep_notification(wake_time) -> None:
     from datetime import datetime
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not bot_token or not chat_id:
+    chat_ids_raw = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not bot_token or not chat_ids_raw:
         return
+
+    chat_ids = [cid.strip() for cid in chat_ids_raw.split(",") if cid.strip()]
 
     now = datetime.now()
     msg = (
@@ -166,13 +168,14 @@ def _send_sleep_notification(wake_time) -> None:
         f"{'='*30}"
     )
 
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = json.dumps({"chat_id": chat_id, "text": msg}).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
-    except Exception as e:
-        logger.warning("Failed to send sleep notification: %s", e)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    for chat_id in chat_ids:
+        try:
+            payload = json.dumps({"chat_id": chat_id, "text": msg}).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            logger.warning("Failed to send sleep notification to %s: %s", chat_id, e)
 
 
 def main() -> None:
