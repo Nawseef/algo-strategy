@@ -346,13 +346,13 @@ def main() -> None:
     )
     strategy_engine.register(bb_squeeze_strategy)
 
-    # Strategy 6: SMA Crossover (baseline comparison)
-    sma_strategy = SMACrossoverStrategy(
-        fast_period=config.strategy.sma_fast_period,
-        slow_period=config.strategy.sma_slow_period,
-        instrument_tokens=config.instruments.exchange_tokens,
-    )
-    strategy_engine.register(sma_strategy)
+    # Strategy 6: SMA Crossover (baseline comparison) — DISABLED
+    # sma_strategy = SMACrossoverStrategy(
+    #     fast_period=config.strategy.sma_fast_period,
+    #     slow_period=config.strategy.sma_slow_period,
+    #     instrument_tokens=config.instruments.exchange_tokens,
+    # )
+    # strategy_engine.register(sma_strategy)
 
     # ─── Multi-Trader Manager (Isolated + Confluence) ────────────
     strategy_names = [s.name for s in strategy_engine.strategies]
