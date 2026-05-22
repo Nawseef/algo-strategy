@@ -3,7 +3,7 @@ DataManager — Historical data warmup engine.
 
 Responsibilities:
 - Collects warmup requirements from all registered strategies
-- Fetches historical candles from Groww's Backtesting API
+- Fetches historical candles from Groww's deprecated Historical Data API
 - Injects them into the CandleBuilder's history buffer
 - Handles rate limiting, retries, and graceful degradation
 
@@ -12,11 +12,14 @@ Architecture:
     → Fetches from Groww API (with concurrency control) → Injects into CandleBuilder
     → Strategies start with full indicator context
 
-Uses the new `get_historical_candles()` API (Backtesting endpoint) which supports:
-- Groww symbol format (NSE-RELIANCE, NSE-NIFTY)
-- All candle intervals (1m to 1month)
-- FNO with Open Interest
-- Data from 2020 onwards
+Uses the old `get_historical_candle_data()` API which supports:
+- trading_symbol directly (RELIANCE, TCS, INFY)
+- interval_in_minutes (1, 5, 15, 30, 60, 1440)
+- Epoch-second timestamps in response
+- Works with existing TOTP auth (no paid subscription needed)
+
+Note: This API is deprecated by Groww but has no announced sunset date.
+The new `get_historical_candles()` requires a ₹499/month Backtesting subscription.
 """
 
 import asyncio
@@ -24,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from app.broker.groww import GrowwBroker
+from app.broker.groww import GrowwBroker, is_index_token
 from app.core.candle_builder import CandleBuilder
 from app.core.models import Candle, Timeframe
 from app.strategy.base import BaseStrategy
@@ -32,24 +35,24 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ─── Timeframe → Groww candle_interval mapping ────────────────────────
-TIMEFRAME_TO_INTERVAL: dict[Timeframe, str] = {
-    Timeframe.M1: "1minute",
-    Timeframe.M5: "5minute",
-    Timeframe.M15: "15minute",
-    Timeframe.M30: "30minute",
-    Timeframe.H1: "1hour",
-    Timeframe.D1: "1day",
+# ─── Timeframe → interval_in_minutes mapping (old API) ───────────────
+TIMEFRAME_TO_INTERVAL: dict[Timeframe, int] = {
+    Timeframe.M1: 1,
+    Timeframe.M5: 5,
+    Timeframe.M15: 15,
+    Timeframe.M30: 30,
+    Timeframe.H1: 60,
+    Timeframe.D1: 1440,
 }
 
-# Maximum lookback per interval (Groww Backtesting API limits)
+# Maximum days per single request (old API limits)
 MAX_LOOKBACK_DAYS: dict[Timeframe, int] = {
-    Timeframe.M1: 30,
-    Timeframe.M5: 30,
-    Timeframe.M15: 90,
-    Timeframe.M30: 90,
-    Timeframe.H1: 180,
-    Timeframe.D1: 180,
+    Timeframe.M1: 7,
+    Timeframe.M5: 15,
+    Timeframe.M15: 30,
+    Timeframe.M30: 30,
+    Timeframe.H1: 150,
+    Timeframe.D1: 1080,
 }
 
 # Timeframe durations in minutes (for calculating how many days to fetch)
@@ -73,7 +76,6 @@ class WarmupRequest:
     segment: str
     timeframe: Timeframe
     candles_needed: int
-    groww_symbol: str
 
 
 @dataclass
@@ -157,7 +159,7 @@ class DataManager:
             {tf.value: count for tf, count in merged_requirements.items()},
         )
 
-        # 2. Build fetch requests
+        # 2. Build fetch requests (skipping indices — old API doesn't support them)
         requests = self._build_requests(
             exchange_tokens, instrument_map, merged_requirements
         )
@@ -172,7 +174,7 @@ class DataManager:
         logger.info(
             "Starting warmup: %d requests for %d instruments...",
             len(requests),
-            len(exchange_tokens),
+            result.total_instruments,
         )
 
         # 3. Execute fetches with concurrency control
@@ -242,17 +244,17 @@ class DataManager:
         requests = []
 
         for token in exchange_tokens:
-            # Resolve symbol
+            # Skip indices — old historical API doesn't support them
+            if is_index_token(token):
+                logger.debug("Skipping index token '%s' for warmup (not supported by historical API)", token)
+                continue
+
+            # Resolve symbol (trading_symbol as defined by exchange)
             inst_data = instrument_map.get(token, {})
             symbol = inst_data.get("symbol", token)
 
-            # Determine exchange (indices and equities both on NSE CASH)
-            exchange = "NSE"  # Default; extend for BSE/MCX later
-
-            # Build groww_symbol (format: NSE-RELIANCE, NSE-NIFTY)
-            groww_symbol = f"{exchange}-{symbol}"
-
-            # Segment: both equities and indices use CASH
+            # Exchange and segment
+            exchange = "NSE"
             segment = "CASH"
 
             for timeframe, candles_needed in requirements.items():
@@ -264,7 +266,6 @@ class DataManager:
                         segment=segment,
                         timeframe=timeframe,
                         candles_needed=candles_needed,
-                        groww_symbol=groww_symbol,
                     )
                 )
 
@@ -289,7 +290,7 @@ class DataManager:
 
         for i, item in enumerate(completed):
             if isinstance(item, Exception):
-                logger.error("Warmup fetch exception for %s: %s", requests[i].groww_symbol, item)
+                logger.error("Warmup fetch exception for %s: %s", requests[i].trading_symbol, item)
                 results.append((requests[i], None))
             else:
                 results.append(item)
@@ -348,7 +349,7 @@ class DataManager:
     def _fetch_candles(self, req: WarmupRequest) -> list[Candle]:
         """
         Fetch historical candles from Groww API (blocking call).
-        Uses the new Backtesting API: get_historical_candles().
+        Uses the deprecated get_historical_candle_data() endpoint.
         """
         api = self._broker.api
 
@@ -371,29 +372,29 @@ class DataManager:
         days_needed = min(days_needed, max_lookback)
         start_time = end_time - timedelta(days=days_needed)
 
-        # Format times
+        # Format times as "YYYY-MM-DD HH:mm:ss"
         start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
         end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Get candle interval constant
+        # Get interval in minutes (integer)
         candle_interval = TIMEFRAME_TO_INTERVAL[req.timeframe]
 
         logger.debug(
-            "Fetching %s candles for %s: %s to %s",
+            "Fetching %d-min candles for %s: %s to %s",
             candle_interval,
-            req.groww_symbol,
+            req.trading_symbol,
             start_str,
             end_str,
         )
 
-        # Call Groww API
-        response = api.get_historical_candles(
+        # Call Groww old Historical Data API
+        response = api.get_historical_candle_data(
+            trading_symbol=req.trading_symbol,
             exchange=req.exchange,
             segment=req.segment,
-            groww_symbol=req.groww_symbol,
             start_time=start_str,
             end_time=end_str,
-            candle_interval=candle_interval,
+            interval_in_minutes=candle_interval,
         )
 
         # Parse response into Candle objects
@@ -414,10 +415,10 @@ class DataManager:
         self, raw_candles: list[list], req: WarmupRequest
     ) -> list[Candle]:
         """
-        Parse raw candle arrays from Groww API into Candle objects.
+        Parse raw candle arrays from Groww old Historical Data API into Candle objects.
 
-        Groww Backtesting API response format:
-        [timestamp_str, open, high, low, close, volume, open_interest]
+        Old API response format per candle:
+        [epoch_seconds, open, high, low, close, volume]
         """
         candles = []
 
@@ -425,17 +426,11 @@ class DataManager:
             if len(raw) < 6:
                 continue
 
-            # Parse timestamp (format: "2025-09-24T10:30:00")
-            timestamp_str = raw[0]
+            # Timestamp is epoch seconds in old API — convert to milliseconds
             try:
-                dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S")
-                timestamp_ms = dt.timestamp() * 1000
+                timestamp_ms = float(raw[0]) * 1000
             except (ValueError, TypeError):
-                # Try epoch seconds fallback
-                try:
-                    timestamp_ms = float(raw[0]) * 1000
-                except (ValueError, TypeError):
-                    continue
+                continue
 
             candle = Candle(
                 exchange=req.exchange,
