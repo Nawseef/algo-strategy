@@ -75,7 +75,7 @@ class SuperTrendStrategy(BaseStrategy):
     @property
     def warmup_config(self) -> dict[str, int]:
         # Need ATR(10) + some buffer for SuperTrend to stabilize + EMA(20)
-        return {"5m": 30}
+        return {"5m": 50}
 
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
         """Evaluate SuperTrend on each 5-min candle."""

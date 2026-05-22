@@ -127,6 +127,9 @@ class Position:
     close_reason: str = ""
     stop_loss: float = 0.0
     take_profit: float = 0.0
+    # Track max favorable/adverse excursion for trade analysis
+    max_favorable_price: float = 0.0  # best price reached during trade
+    max_adverse_price: float = 0.0  # worst price reached during trade
 
     @property
     def is_open(self) -> bool:

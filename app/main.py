@@ -370,7 +370,7 @@ def main() -> None:
     telegram = TelegramNotifier(
         event_bus=event_bus,
         bot_token=config.telegram.bot_token,
-        chat_id=config.telegram.chat_id,
+        chat_ids=config.telegram.chat_ids,
         paper_trader=None,  # We'll use multi_trader for summaries
         starting_balance=config.paper_trading.starting_balance,
         summary_interval_minutes=config.telegram.summary_interval_minutes,

@@ -84,7 +84,7 @@ class EMACrossoverStrategy(BaseStrategy):
     @property
     def warmup_config(self) -> dict[str, int]:
         # Need enough for EMA(21) + ADX(14) + ATR(14) to stabilize
-        return {"5m": 40}
+        return {"5m": 50}
 
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
         """Evaluate EMA crossover on each 5-min candle."""
