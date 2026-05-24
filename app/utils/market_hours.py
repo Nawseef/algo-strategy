@@ -21,28 +21,23 @@ MARKET_CLOSE = dtime(15, 30)    # Stop processing ticks for strategy
 PRE_MARKET_WAKE = dtime(9, 0)   # 15 min before market open
 
 # 2026 NSE holidays (update annually)
-# Source: https://www.nseindia.com/resources/exchange-communication-holidays
+# Source: NSE Circular No. NSE/CMTR/71775
+# Reference: https://www.nseindia.com/resources/exchange-communication-holidays
 NSE_HOLIDAYS_2026 = {
     date(2026, 1, 26),   # Republic Day
-    date(2026, 2, 26),   # Maha Shivaratri
-    date(2026, 3, 10),   # Holi
-    date(2026, 3, 30),   # Id-Ul-Fitr (Ramadan)
-    date(2026, 4, 2),    # Ram Navami
+    date(2026, 3, 3),    # Holi
+    date(2026, 3, 26),   # Shri Ram Navami
+    date(2026, 3, 31),   # Shri Mahavir Jayanti
     date(2026, 4, 3),    # Good Friday
-    date(2026, 4, 14),   # Dr. Ambedkar Jayanti
+    date(2026, 4, 14),   # Dr. Baba Saheb Ambedkar Jayanti
     date(2026, 5, 1),    # Maharashtra Day
-    date(2026, 5, 25),   # Buddha Purnima
-    date(2026, 6, 5),    # Id-Ul-Adha (Bakri Id)
-    date(2026, 7, 6),    # Muharram
-    date(2026, 8, 15),   # Independence Day
-    date(2026, 8, 19),   # Janmashtami
-    date(2026, 9, 4),    # Milad-Un-Nabi
+    date(2026, 5, 28),   # Bakri Id (Eid-Ul-Adha)
+    date(2026, 6, 26),   # Muharram
+    date(2026, 9, 14),   # Ganesh Chaturthi
     date(2026, 10, 2),   # Mahatma Gandhi Jayanti
     date(2026, 10, 20),  # Dussehra
-    date(2026, 10, 21),  # Dussehra (additional)
-    date(2026, 11, 9),   # Diwali (Laxmi Pujan)
-    date(2026, 11, 10),  # Diwali (Balipratipada)
-    date(2026, 11, 27),  # Guru Nanak Jayanti
+    date(2026, 11, 10),  # Diwali-Balipratipada
+    date(2026, 11, 24),  # Prakash Gurpurb Sri Guru Nanak Dev
     date(2026, 12, 25),  # Christmas
 }
 
