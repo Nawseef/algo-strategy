@@ -351,10 +351,31 @@ class DataManager:
         Fetch historical candles from Groww API (blocking call).
         Uses the deprecated get_historical_candle_data() endpoint.
         """
+        from app.utils.market_hours import MARKET_OPEN, MARKET_CLOSE, is_trading_day
+
         api = self._broker.api
 
         # Calculate time range
-        end_time = datetime.now()
+        # The old API only returns intraday candles for the current session.
+        # If called before market open (e.g., 9:00 AM warmup), there's no
+        # today data yet. Use previous trading day's close as end_time to
+        # guarantee we get historical candles.
+        now = datetime.now()
+        today = now.date()
+        current_time = now.time()
+
+        if is_trading_day(today) and current_time >= MARKET_OPEN:
+            # Market is open — use current time (gets today's candles so far)
+            end_time = now
+        else:
+            # Before market open or non-trading day — use last trading day's close
+            check_date = today - timedelta(days=1)
+            for _ in range(10):
+                if is_trading_day(check_date):
+                    break
+                check_date -= timedelta(days=1)
+            end_time = datetime.combine(check_date, MARKET_CLOSE)
+
         candles_needed = req.candles_needed
         timeframe_minutes = TIMEFRAME_MINUTES[req.timeframe]
         max_lookback = MAX_LOOKBACK_DAYS[req.timeframe]
@@ -366,7 +387,10 @@ class DataManager:
         else:
             trading_minutes_per_day = 375
             candles_per_day = trading_minutes_per_day // timeframe_minutes
-            days_needed = (candles_needed // candles_per_day) + 2  # +2 buffer
+            trading_days_needed = (candles_needed // candles_per_day) + 1
+            # Convert trading days to calendar days (account for weekends/holidays)
+            # Roughly 5 trading days per 7 calendar days, add extra buffer
+            days_needed = int(trading_days_needed * 7 / 5) + 2
 
         # Clamp to API limits
         days_needed = min(days_needed, max_lookback)
