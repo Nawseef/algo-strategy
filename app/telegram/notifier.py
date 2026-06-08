@@ -23,6 +23,7 @@ from app.core.events import EventBus
 from app.core.models import OrderSide, Position, Signal
 from app.utils.instruments import get_instrument_name, get_instrument_short_name
 from app.utils.logger import get_logger
+from app.utils.market_hours import is_trading_day
 
 logger = get_logger(__name__)
 
@@ -402,8 +403,8 @@ class TelegramNotifier:
 
         now = datetime.now()
 
-        # Don't send outside market hours
-        if now.time() < MARKET_OPEN or now.time() > MARKET_CLOSE:
+        # Don't send outside market hours or on non-trading days (weekends/holidays)
+        if not is_trading_day() or now.time() < MARKET_OPEN or now.time() > MARKET_CLOSE:
             self._schedule_summary()
             return
 
@@ -482,7 +483,8 @@ class TelegramNotifier:
 
         now = datetime.now().time()
         # Send between 3:35 and 3:37 PM (after last ticks settle), once per day
-        if dtime(15, 35) <= now <= dtime(15, 37) and not self._eod_sent_today:
+        # Only on actual trading days
+        if is_trading_day() and dtime(15, 35) <= now <= dtime(15, 37) and not self._eod_sent_today:
             self._eod_sent_today = True
             self._send_eod_report()
 
