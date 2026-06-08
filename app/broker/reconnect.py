@@ -64,10 +64,22 @@ class ReconnectingFeed:
         instruments: list[Instrument],
         on_tick: Callable[[Tick], None] | None = None,
     ) -> None:
-        """Subscribe to LTP. Stores subscription for reconnection."""
+        """Subscribe to LTP. Stores subscription for reconnection.
+        
+        If the feed connection fails during initial subscribe, the instruments
+        are still stored and will be subscribed when start/start_blocking is called
+        (inside the reconnect loop which handles retries).
+        """
         self._ltp_instruments = instruments
         self._ltp_callback = on_tick
-        self._feed.subscribe_ltp(instruments, on_tick=on_tick)
+        try:
+            self._feed.subscribe_ltp(instruments, on_tick=on_tick)
+        except Exception as e:
+            # Don't crash — the reconnect loop will handle this
+            logger.warning(
+                "Initial subscription failed (%s). Will retry in reconnect loop.",
+                e,
+            )
 
     def start(self) -> None:
         """Start the feed in a background thread with reconnection."""
@@ -99,6 +111,8 @@ class ReconnectingFeed:
         while self._running:
             try:
                 logger.info("Starting feed consumption...")
+                # Ensure we have a working subscription before consuming
+                self._resubscribe()
                 self._feed.consume()
 
                 # If consume() returns normally, the feed ended cleanly
@@ -153,9 +167,6 @@ class ReconnectingFeed:
             # Re-authenticate before reconnecting — session tokens expire
             self._reauthenticate()
 
-            # Re-subscribe after reconnection
-            self._resubscribe()
-
     def _reauthenticate(self) -> None:
         """Re-authenticate with the broker to refresh the session token."""
         if self._broker is None:
@@ -168,9 +179,13 @@ class ReconnectingFeed:
             logger.error("Re-authentication failed: %s", e)
 
     def _resubscribe(self) -> None:
-        """Re-subscribe to all previously subscribed instruments."""
+        """Re-subscribe to all previously subscribed instruments.
+        Resets the feed client first to force a fresh WebSocket connection."""
         try:
             if self._ltp_instruments:
+                # Reset the feed so a fresh NATS connection is created
+                if hasattr(self._feed, '_reset_feed'):
+                    self._feed._reset_feed()
                 logger.info(
                     "Re-subscribing to %d instruments...",
                     len(self._ltp_instruments),

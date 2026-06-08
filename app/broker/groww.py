@@ -117,11 +117,15 @@ class GrowwFeedClient(BrokerFeed):
         self._running = False
 
     def _ensure_feed(self) -> GrowwFeed:
-        """Lazily initialize the GrowwFeed client."""
+        """Lazily initialize the GrowwFeed client. Creates a fresh instance if needed."""
         if self._feed is None:
             self._feed = GrowwFeed(self._broker.api)
             logger.info("GrowwFeed client initialized")
         return self._feed
+
+    def _reset_feed(self) -> None:
+        """Reset the feed so the next _ensure_feed() creates a fresh connection."""
+        self._feed = None
 
     def _to_sdk_format(self, instruments: list[Instrument]) -> list[dict[str, str]]:
         """Convert our Instrument dataclass to Groww SDK dict format."""
