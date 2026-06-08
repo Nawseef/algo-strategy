@@ -2,15 +2,15 @@
 SuperTrend Strategy.
 
 A trend-following strategy using the ATR-based SuperTrend indicator:
-1. SuperTrend(10, 3) on 5-min candles provides trend direction.
+1. SuperTrend(10, 2.0) on 5-min candles provides trend direction.
 2. Entry on SuperTrend flip (direction change).
-3. EMA(20) as confirmation filter.
+3. Chop filter: skip if too many flips in recent candles (ranging market).
 4. SuperTrend line itself serves as the stop-loss level.
 5. Take-profit at 2:1 reward-to-risk.
 
 SuperTrend adapts to volatility automatically via ATR, making it
-effective across different market conditions. Combined with EMA filter,
-it avoids entries in choppy/ranging markets.
+effective across different market conditions. Multiplier 2.0 gives
+tighter bands suited for liquid Indian large-caps on 5-min charts.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from datetime import datetime, time as dtime
 from app.core.models import Candle, Signal, SignalType, Timeframe
 from app.strategy.base import BaseStrategy
 from app.strategy.cpr_filter import CPRFilter
-from app.strategy.indicators import ema, supertrend_with_prev
+from app.strategy.indicators import supertrend_with_prev
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -31,16 +31,15 @@ NO_TRADE_AFTER = dtime(15, 15)
 
 class SuperTrendStrategy(BaseStrategy):
     """
-    SuperTrend strategy with EMA confirmation.
+    SuperTrend strategy with chop filter.
 
     Parameters:
         instrument_tokens: Only trade these instruments.
         atr_period: ATR period for SuperTrend (default 10).
-        multiplier: SuperTrend multiplier (default 3.0).
-        ema_period: EMA period for trend confirmation (default 20).
+        multiplier: SuperTrend multiplier (default 2.0).
         rr_ratio: Reward-to-risk ratio (default 2.0).
         max_flips_in_window: Max SuperTrend flips in last N candles before
-                            considering market choppy (default 3 flips in 10 candles).
+                            considering market choppy (default 4 flips in 10 candles).
         chop_window: Number of candles to check for choppiness (default 10).
     """
 
@@ -48,17 +47,15 @@ class SuperTrendStrategy(BaseStrategy):
         self,
         instrument_tokens: list[str] | None = None,
         atr_period: int = 10,
-        multiplier: float = 3.0,
-        ema_period: int = 20,
+        multiplier: float = 2.0,
         rr_ratio: float = 2.0,
-        max_flips_in_window: int = 3,
+        max_flips_in_window: int = 4,
         chop_window: int = 10,
         cpr_filter: CPRFilter | None = None,
     ) -> None:
         self._instrument_tokens = instrument_tokens or []
         self._atr_period = atr_period
         self._multiplier = multiplier
-        self._ema_period = ema_period
         self._rr_ratio = rr_ratio
         self._max_flips = max_flips_in_window
         self._chop_window = chop_window
@@ -74,7 +71,7 @@ class SuperTrendStrategy(BaseStrategy):
 
     @property
     def warmup_config(self) -> dict[str, int]:
-        # Need ATR(10) + some buffer for SuperTrend to stabilize + EMA(20)
+        # Need ATR(10) + buffer for SuperTrend to stabilize — 30 candles sufficient
         return {"5m": 50}
 
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
@@ -133,30 +130,18 @@ class SuperTrendStrategy(BaseStrategy):
                 if dir_history[i] != dir_history[i - 1]
             )
             if flips >= self._max_flips:
-                logger.debug(
+                logger.info(
                     "SuperTrend on %s: choppy market (%d flips in %d candles), skipping",
                     token, flips, self._chop_window,
                 )
                 return None
 
-        # EMA confirmation
-        closes = [c.close for c in all_candles]
-        ema_val = ema(closes, self._ema_period)
-        if ema_val is None:
-            return None
-
         entry = candle.close
 
         if flipped_to_up:
-            # Confirm: price should be above EMA
-            if entry < ema_val:
-                logger.debug("SuperTrend UP flip on %s rejected: price %.2f < EMA %.2f",
-                             token, entry, ema_val)
-                return None
-
             # CPR filter
             if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.BUY, entry):
-                logger.debug("SuperTrend LONG on %s blocked by CPR", token)
+                logger.info("SuperTrend LONG on %s blocked by CPR", token)
                 return None
 
             # SL at SuperTrend line (lower band)
@@ -169,8 +154,8 @@ class SuperTrendStrategy(BaseStrategy):
             tp = entry + (self._rr_ratio * risk)
 
             logger.info(
-                "SuperTrend LONG flip on %s: entry=%.2f SL=%.2f TP=%.2f | ST=%.2f EMA=%.2f",
-                token, entry, sl, tp, current_st, ema_val,
+                "SuperTrend LONG flip on %s: entry=%.2f SL=%.2f TP=%.2f | ST=%.2f",
+                token, entry, sl, tp, current_st,
             )
 
             return Signal(
@@ -181,26 +166,19 @@ class SuperTrendStrategy(BaseStrategy):
                 price=entry,
                 timestamp_ms=candle.timestamp_ms,
                 strategy_name=self.name,
-                reason=f"SuperTrend flipped UP (ST={current_st:.2f}, EMA={ema_val:.2f})",
+                reason=f"SuperTrend flipped UP (ST={current_st:.2f})",
                 stop_loss=sl,
                 take_profit=tp,
                 metadata={
                     "supertrend": current_st,
-                    "ema": ema_val,
                     "direction": "UP",
                 },
             )
 
         if flipped_to_down:
-            # Confirm: price should be below EMA
-            if entry > ema_val:
-                logger.debug("SuperTrend DOWN flip on %s rejected: price %.2f > EMA %.2f",
-                             token, entry, ema_val)
-                return None
-
             # CPR filter
             if self._cpr_filter and not self._cpr_filter.allows_signal(SignalType.SELL, entry):
-                logger.debug("SuperTrend SHORT on %s blocked by CPR", token)
+                logger.info("SuperTrend SHORT on %s blocked by CPR", token)
                 return None
 
             # SL at SuperTrend line (upper band)
@@ -213,8 +191,8 @@ class SuperTrendStrategy(BaseStrategy):
             tp = entry - (self._rr_ratio * risk)
 
             logger.info(
-                "SuperTrend SHORT flip on %s: entry=%.2f SL=%.2f TP=%.2f | ST=%.2f EMA=%.2f",
-                token, entry, sl, tp, current_st, ema_val,
+                "SuperTrend SHORT flip on %s: entry=%.2f SL=%.2f TP=%.2f | ST=%.2f",
+                token, entry, sl, tp, current_st,
             )
 
             return Signal(
@@ -225,12 +203,11 @@ class SuperTrendStrategy(BaseStrategy):
                 price=entry,
                 timestamp_ms=candle.timestamp_ms,
                 strategy_name=self.name,
-                reason=f"SuperTrend flipped DOWN (ST={current_st:.2f}, EMA={ema_val:.2f})",
+                reason=f"SuperTrend flipped DOWN (ST={current_st:.2f})",
                 stop_loss=sl,
                 take_profit=tp,
                 metadata={
                     "supertrend": current_st,
-                    "ema": ema_val,
                     "direction": "DOWN",
                 },
             )

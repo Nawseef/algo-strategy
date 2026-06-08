@@ -19,7 +19,7 @@ from datetime import datetime, time as dtime
 from app.core.models import Candle, Signal, SignalType, Timeframe
 from app.strategy.base import BaseStrategy
 from app.strategy.cpr_filter import CPRFilter
-from app.strategy.indicators import adx, atr, ema, sma, vwap
+from app.strategy.indicators import adx, atr, ema, vwap
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -50,13 +50,12 @@ class EMACrossoverStrategy(BaseStrategy):
         instrument_tokens: list[str] | None = None,
         fast_period: int = 9,
         slow_period: int = 21,
-        adx_threshold: float = 25.0,
+        adx_threshold: float = 20.0,
         atr_period: int = 14,
         sl_atr_multiplier: float = 1.5,
         tp_atr_multiplier: float = 3.0,
-        volume_multiplier: float = 1.3,
         use_vwap_filter: bool = True,
-        cooldown_candles: int = 5,
+        cooldown_candles: int = 3,
         cpr_filter: CPRFilter | None = None,
     ) -> None:
         self._instrument_tokens = instrument_tokens or []
@@ -66,7 +65,6 @@ class EMACrossoverStrategy(BaseStrategy):
         self._atr_period = atr_period
         self._sl_atr_mult = sl_atr_multiplier
         self._tp_atr_mult = tp_atr_multiplier
-        self._volume_mult = volume_multiplier
         self._use_vwap_filter = use_vwap_filter
         self._cooldown_candles = cooldown_candles
         self._cpr_filter = cpr_filter
@@ -83,7 +81,7 @@ class EMACrossoverStrategy(BaseStrategy):
 
     @property
     def warmup_config(self) -> dict[str, int]:
-        # Need enough for EMA(21) + ADX(14) + ATR(14) to stabilize
+        # Need enough for EMA(21) + ADX(14) to stabilize — 30 candles is sufficient
         return {"5m": 50}
 
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
@@ -107,12 +105,12 @@ class EMACrossoverStrategy(BaseStrategy):
         if token in self._candles_since_signal:
             self._candles_since_signal[token] += 1
 
-        # Need enough history
-        if len(history) < 35:
+        # Need enough history for EMA(21) + ADX(14) — minimum 25 candles
+        if len(history) < 25:
             return None
 
-        # All candles including current
-        all_candles = history[-35:] + [candle]
+        # All candles including current — use last 30 for indicator stability
+        all_candles = history[-30:] + [candle]
         closes = [c.close for c in all_candles]
 
         # Calculate EMAs
@@ -143,22 +141,15 @@ class EMACrossoverStrategy(BaseStrategy):
         # Cooldown check
         candles_since = self._candles_since_signal.get(token, self._cooldown_candles + 1)
         if candles_since < self._cooldown_candles:
-            logger.debug("EMA crossover cooldown active for %s (%d/%d candles)",
-                         token, candles_since, self._cooldown_candles)
+            logger.info("EMA crossover cooldown active for %s (%d/%d candles)",
+                        token, candles_since, self._cooldown_candles)
             return None
 
-        # ADX filter — need trending market
+        # ADX filter — lowered to 20 (25 was too strict for intraday 5m)
         adx_val = adx(all_candles, 14)
         if adx_val is None or adx_val < self._adx_threshold:
-            logger.debug("EMA crossover on %s rejected: ADX=%.1f < %.1f",
-                         token, adx_val or 0, self._adx_threshold)
-            return None
-
-        # Volume confirmation
-        avg_volume = sma([float(c.volume) for c in all_candles[-10:]], 10)
-        if avg_volume and candle.volume < avg_volume * self._volume_mult:
-            logger.debug("EMA crossover on %s rejected: volume %d < %.0f (%.1f× avg)",
-                         token, candle.volume, avg_volume * self._volume_mult, self._volume_mult)
+            logger.info("EMA crossover on %s rejected: ADX=%.1f < %.1f",
+                        token, adx_val or 0, self._adx_threshold)
             return None
 
         # ATR for SL/TP
@@ -166,18 +157,19 @@ class EMACrossoverStrategy(BaseStrategy):
         if atr_val is None or atr_val <= 0:
             return None
 
-        # VWAP filter
+        # VWAP filter — directional bias only, not a hard block
         if self._use_vwap_filter:
             today_candles = self._get_today_candles(history, candle)
             vwap_val = vwap(today_candles)
             if vwap_val is not None:
-                if bullish_cross and candle.close < vwap_val:
-                    logger.debug("EMA bullish cross on %s rejected: price %.2f < VWAP %.2f",
-                                 token, candle.close, vwap_val)
+                if bullish_cross and candle.close < vwap_val * 0.998:
+                    # Only reject if clearly below VWAP (0.2% buffer)
+                    logger.info("EMA bullish cross on %s rejected: price %.2f well below VWAP %.2f",
+                                token, candle.close, vwap_val)
                     return None
-                if bearish_cross and candle.close > vwap_val:
-                    logger.debug("EMA bearish cross on %s rejected: price %.2f > VWAP %.2f",
-                                 token, candle.close, vwap_val)
+                if bearish_cross and candle.close > vwap_val * 1.002:
+                    logger.info("EMA bearish cross on %s rejected: price %.2f well above VWAP %.2f",
+                                token, candle.close, vwap_val)
                     return None
 
         # Generate signal
@@ -214,7 +206,6 @@ class EMACrossoverStrategy(BaseStrategy):
                     "slow_ema": slow_ema,
                     "adx": adx_val,
                     "atr": atr_val,
-                    "volume": candle.volume,
                 },
             )
 
@@ -248,7 +239,6 @@ class EMACrossoverStrategy(BaseStrategy):
                     "slow_ema": slow_ema,
                     "adx": adx_val,
                     "atr": atr_val,
-                    "volume": candle.volume,
                 },
             )
 

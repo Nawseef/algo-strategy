@@ -50,7 +50,7 @@ class BBSqueezeStrategy(BaseStrategy):
         bb_std: float = 2.0,
         min_squeeze_candles: int = 5,
         rr_ratio: float = 1.5,
-        volume_multiplier: float = 1.5,
+        volume_multiplier: float = 1.2,
         use_vwap_filter: bool = True,
         max_trades_per_day: int = 2,
         cpr_filter: CPRFilter | None = None,
@@ -80,6 +80,55 @@ class BBSqueezeStrategy(BaseStrategy):
     def warmup_config(self) -> dict[str, int]:
         # Need BB(20) + some buffer for squeeze detection
         return {"5m": 50}
+
+    def warmup_history(self, exchange_token: str, candles: list[Candle]) -> None:
+        """
+        Replay historical candles through the squeeze state machine.
+
+        Called after warmup injection so the strategy knows if a squeeze
+        was already in progress when the live session starts. Without this,
+        squeezes that began before market open are invisible to the strategy.
+        """
+        token = exchange_token
+        for candle in candles:
+            if candle.timeframe != Timeframe.M5:
+                continue
+            # Build a rolling window of the last 25 candles seen so far
+            if not hasattr(self, '_warmup_buffer'):
+                self._warmup_buffer: dict[str, list[Candle]] = {}
+            if token not in self._warmup_buffer:
+                self._warmup_buffer[token] = []
+            self._warmup_buffer[token].append(candle)
+            if len(self._warmup_buffer[token]) > 25:
+                self._warmup_buffer[token].pop(0)
+
+            window = self._warmup_buffer[token]
+            if len(window) < 25:
+                continue
+
+            squeeze_active = is_squeeze(window)
+            if squeeze_active is None:
+                continue
+
+            if squeeze_active:
+                self._squeeze_count[token] = self._squeeze_count.get(token, 0) + 1
+                self._was_in_squeeze[token] = True
+                if token not in self._squeeze_volumes:
+                    self._squeeze_volumes[token] = []
+                self._squeeze_volumes[token].append(candle.volume)
+            else:
+                if self._was_in_squeeze.get(token, False):
+                    # Squeeze ended during warmup — reset, don't fire signal
+                    self._squeeze_count[token] = 0
+                    self._squeeze_volumes[token] = []
+                self._was_in_squeeze[token] = False
+
+        logger.info(
+            "BB_Squeeze warmup replay for %s: squeeze_active=%s, squeeze_count=%d",
+            token,
+            self._was_in_squeeze.get(token, False),
+            self._squeeze_count.get(token, 0),
+        )
 
     def on_candle(self, candle: Candle, history: list[Candle]) -> Signal | None:
         """Evaluate BB Squeeze on each 5-min candle."""
@@ -176,7 +225,8 @@ class BBSqueezeStrategy(BaseStrategy):
         has_volume = candle.volume > avg_squeeze_vol * self._volume_mult if avg_squeeze_vol > 0 else True
 
         if not has_volume:
-            logger.debug("BB Squeeze breakout on %s rejected: low volume", token)
+            logger.info("BB Squeeze breakout on %s rejected: low volume (%d < %.0f × %.1f avg)",
+                        token, candle.volume, avg_squeeze_vol, self._volume_mult)
             return None
 
         # VWAP filter

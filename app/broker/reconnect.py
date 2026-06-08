@@ -29,12 +29,13 @@ class ReconnectingFeed:
     On disconnection or error:
     1. Emits a 'reconnect' event on the event bus.
     2. Waits with exponential backoff + jitter.
-    3. Re-subscribes to all previously subscribed instruments.
-    4. Resumes consumption.
+    3. Re-authenticates the broker (token may have expired).
+    4. Re-subscribes to all previously subscribed instruments.
+    5. Resumes consumption.
 
     Usage:
         feed = GrowwFeedClient(broker)
-        reconnecting = ReconnectingFeed(feed, event_bus)
+        reconnecting = ReconnectingFeed(feed, event_bus, broker=broker)
         reconnecting.subscribe_ltp(instruments, on_tick=callback)
         reconnecting.start()  # runs in a thread, auto-reconnects
     """
@@ -44,10 +45,12 @@ class ReconnectingFeed:
         feed: BrokerFeed,
         event_bus: EventBus,
         max_retries: int = 0,  # 0 = unlimited
+        broker=None,           # GrowwBroker instance for re-auth on reconnect
     ) -> None:
         self._feed = feed
         self._event_bus = event_bus
         self._max_retries = max_retries
+        self._broker = broker
         self._running = False
         self._thread: threading.Thread | None = None
 
@@ -106,7 +109,14 @@ class ReconnectingFeed:
                     break
                 logger.warning("Feed consumption ended unexpectedly")
 
-            except Exception as e:
+            except KeyboardInterrupt:
+                # Propagate Ctrl+C so the main shutdown handler fires
+                raise
+            except SystemExit:
+                # Propagate explicit exits
+                raise
+            except BaseException as e:
+                # Catch everything including SDK-level errors that bypass Exception
                 if not self._running:
                     break
                 logger.error("Feed error: %s", e, exc_info=True)
@@ -140,8 +150,22 @@ class ReconnectingFeed:
 
             time.sleep(backoff)
 
+            # Re-authenticate before reconnecting — session tokens expire
+            self._reauthenticate()
+
             # Re-subscribe after reconnection
             self._resubscribe()
+
+    def _reauthenticate(self) -> None:
+        """Re-authenticate with the broker to refresh the session token."""
+        if self._broker is None:
+            return
+        try:
+            logger.info("Re-authenticating with broker before reconnect...")
+            self._broker.authenticate()
+            logger.info("Re-authentication successful")
+        except Exception as e:
+            logger.error("Re-authentication failed: %s", e)
 
     def _resubscribe(self) -> None:
         """Re-subscribe to all previously subscribed instruments."""

@@ -3,7 +3,8 @@ DataManager — Historical data warmup engine.
 
 Responsibilities:
 - Collects warmup requirements from all registered strategies
-- Fetches historical candles from Groww's deprecated Historical Data API
+- Fetches historical candles from Groww's Backtesting API (get_historical_candles)
+- Falls back to the deprecated get_historical_candle_data() if the new API fails
 - Injects them into the CandleBuilder's history buffer
 - Handles rate limiting, retries, and graceful degradation
 
@@ -12,20 +13,28 @@ Architecture:
     → Fetches from Groww API (with concurrency control) → Injects into CandleBuilder
     → Strategies start with full indicator context
 
-Uses the old `get_historical_candle_data()` API which supports:
-- trading_symbol directly (RELIANCE, TCS, INFY)
-- interval_in_minutes (1, 5, 15, 30, 60, 1440)
-- Epoch-second timestamps in response
-- Works with existing TOTP auth (no paid subscription needed)
+New API (primary): get_historical_candles()
+- Requires ₹499/month Backtesting subscription
+- Uses groww_symbol format: "NSE-RELIANCE"
+- Uses candle_interval SDK constants: groww.CANDLE_INTERVAL_MIN_5
+- Timestamps in response are ISO strings: "2025-09-24T10:30:00"
+- Each candle: [timestamp_iso, open, high, low, close, volume, open_interest]
+- Data available from 2020 onwards
 
-Note: This API is deprecated by Groww but has no announced sunset date.
-The new `get_historical_candles()` requires a ₹499/month Backtesting subscription.
+Old API (fallback): get_historical_candle_data()
+- Deprecated — may be removed by Groww at any time
+- Uses trading_symbol directly: "RELIANCE"
+- Uses interval_in_minutes integers
+- Timestamps in response are epoch seconds
+- Each candle: [epoch_seconds, open, high, low, close, volume]
 """
 
 import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+
+from growwapi import GrowwAPI
 
 from app.broker.groww import GrowwBroker, is_index_token
 from app.core.candle_builder import CandleBuilder
@@ -35,8 +44,18 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ─── Timeframe → interval_in_minutes mapping (old API) ───────────────
-TIMEFRAME_TO_INTERVAL: dict[Timeframe, int] = {
+# ─── Timeframe → new API candle_interval string mapping ──────────────
+TIMEFRAME_TO_INTERVAL_NEW: dict[Timeframe, str] = {
+    Timeframe.M1:  "1minute",
+    Timeframe.M5:  "5minute",
+    Timeframe.M15: "15minute",
+    Timeframe.M30: "30minute",
+    Timeframe.H1:  "1hour",
+    Timeframe.D1:  "1day",
+}
+
+# ─── Timeframe → old API interval_in_minutes mapping (fallback) ──────
+TIMEFRAME_TO_INTERVAL_OLD: dict[Timeframe, int] = {
     Timeframe.M1: 1,
     Timeframe.M5: 5,
     Timeframe.M15: 15,
@@ -45,17 +64,17 @@ TIMEFRAME_TO_INTERVAL: dict[Timeframe, int] = {
     Timeframe.D1: 1440,
 }
 
-# Maximum days per single request (old API limits)
+# Maximum lookback days per timeframe (new API limits)
 MAX_LOOKBACK_DAYS: dict[Timeframe, int] = {
-    Timeframe.M1: 7,
-    Timeframe.M5: 15,
-    Timeframe.M15: 30,
-    Timeframe.M30: 30,
-    Timeframe.H1: 150,
-    Timeframe.D1: 1080,
+    Timeframe.M1:  30,
+    Timeframe.M5:  30,
+    Timeframe.M15: 90,
+    Timeframe.M30: 90,
+    Timeframe.H1:  180,
+    Timeframe.D1:  180,
 }
 
-# Timeframe durations in minutes (for calculating how many days to fetch)
+# Timeframe durations in minutes (for estimating days needed)
 TIMEFRAME_MINUTES: dict[Timeframe, int] = {
     Timeframe.M1: 1,
     Timeframe.M5: 5,
@@ -159,7 +178,7 @@ class DataManager:
             {tf.value: count for tf, count in merged_requirements.items()},
         )
 
-        # 2. Build fetch requests (skipping indices — old API doesn't support them)
+        # 2. Build fetch requests (skipping indices — historical API doesn't support them)
         requests = self._build_requests(
             exchange_tokens, instrument_map, merged_requirements
         )
@@ -244,16 +263,16 @@ class DataManager:
         requests = []
 
         for token in exchange_tokens:
-            # Skip indices — old historical API doesn't support them
+            # Skip indices — historical API doesn't support them
             if is_index_token(token):
-                logger.debug("Skipping index token '%s' for warmup (not supported by historical API)", token)
+                logger.debug(
+                    "Skipping index token '%s' for warmup (not supported by historical API)",
+                    token,
+                )
                 continue
 
-            # Resolve symbol (trading_symbol as defined by exchange)
             inst_data = instrument_map.get(token, {})
             symbol = inst_data.get("symbol", token)
-
-            # Exchange and segment
             exchange = "NSE"
             segment = "CASH"
 
@@ -278,10 +297,11 @@ class DataManager:
         semaphore = asyncio.Semaphore(self._concurrency)
         results: list[tuple[WarmupRequest, list[Candle] | None]] = []
 
-        async def fetch_one(req: WarmupRequest) -> tuple[WarmupRequest, list[Candle] | None]:
+        async def fetch_one(
+            req: WarmupRequest,
+        ) -> tuple[WarmupRequest, list[Candle] | None]:
             async with semaphore:
                 candles = await self._fetch_with_retry(req)
-                # Throttle between requests
                 await asyncio.sleep(self._delay_ms / 1000.0)
                 return (req, candles)
 
@@ -290,7 +310,11 @@ class DataManager:
 
         for i, item in enumerate(completed):
             if isinstance(item, Exception):
-                logger.error("Warmup fetch exception for %s: %s", requests[i].trading_symbol, item)
+                logger.error(
+                    "Warmup fetch exception for %s: %s",
+                    requests[i].trading_symbol,
+                    item,
+                )
                 results.append((requests[i], None))
             else:
                 results.append(item)
@@ -303,9 +327,7 @@ class DataManager:
         """Fetch historical candles with retry and exponential backoff."""
         for attempt in range(1, self._max_retries + 1):
             try:
-                candles = await asyncio.to_thread(
-                    self._fetch_candles, req
-                )
+                candles = await asyncio.to_thread(self._fetch_candles, req)
                 if candles:
                     logger.debug(
                         "Fetched %d candles for %s/%s",
@@ -316,13 +338,12 @@ class DataManager:
                 return candles
 
             except Exception as e:
-                error_name = type(e).__name__
-                is_rate_limit = "RateLimit" in error_name
+                is_rate_limit = "RateLimit" in type(e).__name__
 
                 if attempt < self._max_retries:
                     backoff = self._retry_backoff_base * (2 ** (attempt - 1))
                     if is_rate_limit:
-                        backoff *= 2  # Extra backoff for rate limits
+                        backoff *= 2
                     logger.warning(
                         "Warmup fetch failed for %s/%s (attempt %d/%d): %s. "
                         "Retrying in %.1fs...",
@@ -349,69 +370,92 @@ class DataManager:
     def _fetch_candles(self, req: WarmupRequest) -> list[Candle]:
         """
         Fetch historical candles from Groww API (blocking call).
-        Uses the deprecated get_historical_candle_data() endpoint.
+        Tries the new get_historical_candles() API first (Backtesting subscription).
+        Falls back to the deprecated get_historical_candle_data() if it fails.
         """
-        from app.utils.market_hours import MARKET_OPEN, MARKET_CLOSE, is_trading_day
+        start_str, end_str = self._calculate_time_range(req)
 
+        # Try new API first
+        try:
+            return self._fetch_candles_new_api(req, start_str, end_str)
+        except Exception as e:
+            logger.warning(
+                "New API failed for %s/%s (%s), falling back to old API",
+                req.trading_symbol,
+                req.timeframe.value,
+                e,
+            )
+
+        # Fall back to old deprecated API
+        return self._fetch_candles_old_api(req, start_str, end_str)
+
+    def _fetch_candles_new_api(
+        self, req: WarmupRequest, start_str: str, end_str: str
+    ) -> list[Candle]:
+        """
+        Fetch using the new get_historical_candles() Backtesting API.
+
+        Response candle format:
+        ["2025-09-24T10:30:00", open, high, low, close, volume, open_interest]
+        """
         api = self._broker.api
-
-        # Calculate time range
-        # The old API only returns intraday candles for the current session.
-        # If called before market open (e.g., 9:00 AM warmup), there's no
-        # today data yet. Use previous trading day's close as end_time to
-        # guarantee we get historical candles.
-        now = datetime.now()
-        today = now.date()
-        current_time = now.time()
-
-        if is_trading_day(today) and current_time >= MARKET_OPEN:
-            # Market is open — use current time (gets today's candles so far)
-            end_time = now
-        else:
-            # Before market open or non-trading day — use last trading day's close
-            check_date = today - timedelta(days=1)
-            for _ in range(10):
-                if is_trading_day(check_date):
-                    break
-                check_date -= timedelta(days=1)
-            end_time = datetime.combine(check_date, MARKET_CLOSE)
-
-        candles_needed = req.candles_needed
-        timeframe_minutes = TIMEFRAME_MINUTES[req.timeframe]
-        max_lookback = MAX_LOOKBACK_DAYS[req.timeframe]
-
-        # Estimate how many days of data we need
-        # For intraday: ~375 minutes per trading day (9:15 to 15:30)
-        if req.timeframe == Timeframe.D1:
-            days_needed = candles_needed  # 1 candle per day
-        else:
-            trading_minutes_per_day = 375
-            candles_per_day = trading_minutes_per_day // timeframe_minutes
-            trading_days_needed = (candles_needed // candles_per_day) + 1
-            # Convert trading days to calendar days (account for weekends/holidays)
-            # Roughly 5 trading days per 7 calendar days, add extra buffer
-            days_needed = int(trading_days_needed * 7 / 5) + 2
-
-        # Clamp to API limits
-        days_needed = min(days_needed, max_lookback)
-        start_time = end_time - timedelta(days=days_needed)
-
-        # Format times as "YYYY-MM-DD HH:mm:ss"
-        start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-        end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
-
-        # Get interval in minutes (integer)
-        candle_interval = TIMEFRAME_TO_INTERVAL[req.timeframe]
+        candle_interval = TIMEFRAME_TO_INTERVAL_NEW[req.timeframe]
+        groww_symbol = f"{req.exchange}-{req.trading_symbol}"
 
         logger.debug(
-            "Fetching %d-min candles for %s: %s to %s",
+            "New API: fetching %s candles for %s (%s): %s to %s",
+            candle_interval,
+            req.trading_symbol,
+            groww_symbol,
+            start_str,
+            end_str,
+        )
+
+        response = api.get_historical_candles(
+            exchange=req.exchange,
+            segment=req.segment,
+            groww_symbol=groww_symbol,
+            start_time=start_str,
+            end_time=end_str,
+            candle_interval=candle_interval,
+        )
+
+        raw_candles = response.get("candles", [])
+        if not raw_candles:
+            logger.debug(
+                "No candles returned (new API) for %s/%s",
+                req.trading_symbol,
+                req.timeframe.value,
+            )
+            return []
+
+        candles = self._parse_candles_new_api(raw_candles, req)
+
+        if len(candles) > req.candles_needed:
+            candles = candles[-req.candles_needed:]
+
+        return candles
+
+    def _fetch_candles_old_api(
+        self, req: WarmupRequest, start_str: str, end_str: str
+    ) -> list[Candle]:
+        """
+        Fetch using the deprecated get_historical_candle_data() API (fallback).
+
+        Response candle format:
+        [epoch_seconds, open, high, low, close, volume]
+        """
+        api = self._broker.api
+        candle_interval = TIMEFRAME_TO_INTERVAL_OLD[req.timeframe]
+
+        logger.debug(
+            "Old API (fallback): fetching %d-min candles for %s: %s to %s",
             candle_interval,
             req.trading_symbol,
             start_str,
             end_str,
         )
 
-        # Call Groww old Historical Data API
         response = api.get_historical_candle_data(
             trading_symbol=req.trading_symbol,
             exchange=req.exchange,
@@ -421,25 +465,113 @@ class DataManager:
             interval_in_minutes=candle_interval,
         )
 
-        # Parse response into Candle objects
         raw_candles = response.get("candles", [])
         if not raw_candles:
-            logger.debug("No candles returned for %s/%s", req.trading_symbol, req.timeframe.value)
+            logger.debug(
+                "No candles returned (old API) for %s/%s",
+                req.trading_symbol,
+                req.timeframe.value,
+            )
             return []
 
-        candles = self._parse_candles(raw_candles, req)
+        candles = self._parse_candles_old_api(raw_candles, req)
 
-        # Trim to requested count (take most recent N)
-        if len(candles) > candles_needed:
-            candles = candles[-candles_needed:]
+        if len(candles) > req.candles_needed:
+            candles = candles[-req.candles_needed:]
 
         return candles
 
-    def _parse_candles(
+    def _calculate_time_range(self, req: WarmupRequest) -> tuple[str, str]:
+        """
+        Calculate start/end time strings for the historical data fetch.
+
+        If called before market open, uses the previous trading day's close
+        as end_time so we get complete historical candles rather than an
+        empty current session.
+        """
+        from app.utils.market_hours import MARKET_OPEN, MARKET_CLOSE, is_trading_day
+
+        now = datetime.now()
+        today = now.date()
+        current_time = now.time()
+
+        if is_trading_day(today) and current_time >= MARKET_OPEN:
+            end_time = now
+        else:
+            # Before market open or weekend — use last trading day's close
+            check_date = today - timedelta(days=1)
+            for _ in range(10):
+                if is_trading_day(check_date):
+                    break
+                check_date -= timedelta(days=1)
+            end_time = datetime.combine(check_date, MARKET_CLOSE)
+
+        timeframe_minutes = TIMEFRAME_MINUTES[req.timeframe]
+        max_lookback = MAX_LOOKBACK_DAYS[req.timeframe]
+
+        if req.timeframe == Timeframe.D1:
+            days_needed = req.candles_needed
+        else:
+            trading_minutes_per_day = 375
+            candles_per_day = trading_minutes_per_day // timeframe_minutes
+            trading_days_needed = (req.candles_needed // candles_per_day) + 1
+            days_needed = int(trading_days_needed * 7 / 5) + 2
+
+        days_needed = min(days_needed, max_lookback)
+        start_time = end_time - timedelta(days=days_needed)
+
+        return (
+            start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            end_time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    def _parse_candles_new_api(
         self, raw_candles: list[list], req: WarmupRequest
     ) -> list[Candle]:
         """
-        Parse raw candle arrays from Groww old Historical Data API into Candle objects.
+        Parse candles from new get_historical_candles() API.
+
+        New API response format per candle:
+        ["2025-09-24T10:30:00", open, high, low, close, volume, open_interest]
+        Timestamp is an ISO string, not epoch seconds.
+        """
+        candles = []
+
+        for raw in raw_candles:
+            if len(raw) < 6:
+                continue
+
+            # Timestamp is ISO string — parse and convert to epoch milliseconds
+            try:
+                ts_str = str(raw[0])
+                # Handle both "2025-09-24T10:30:00" and "2025-09-24 10:30:00"
+                ts_str = ts_str.replace("T", " ")
+                dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                timestamp_ms = dt.timestamp() * 1000
+            except (ValueError, TypeError):
+                continue
+
+            candle = Candle(
+                exchange=req.exchange,
+                segment=req.segment,
+                exchange_token=req.exchange_token,
+                timeframe=req.timeframe,
+                timestamp_ms=timestamp_ms,
+                open=float(raw[1]),
+                high=float(raw[2]),
+                low=float(raw[3]),
+                close=float(raw[4]),
+                volume=int(raw[5]) if raw[5] is not None else 0,
+            )
+            candles.append(candle)
+
+        return candles
+
+    def _parse_candles_old_api(
+        self, raw_candles: list[list], req: WarmupRequest
+    ) -> list[Candle]:
+        """
+        Parse candles from deprecated get_historical_candle_data() API.
 
         Old API response format per candle:
         [epoch_seconds, open, high, low, close, volume]
@@ -450,7 +582,7 @@ class DataManager:
             if len(raw) < 6:
                 continue
 
-            # Timestamp is epoch seconds in old API — convert to milliseconds
+            # Timestamp is epoch seconds — convert to milliseconds
             try:
                 timestamp_ms = float(raw[0]) * 1000
             except (ValueError, TypeError):

@@ -311,13 +311,12 @@ def main() -> None:
         instrument_tokens=config.instruments.exchange_tokens,
         fast_period=9,
         slow_period=21,
-        adx_threshold=25.0,
+        adx_threshold=20.0,
         atr_period=14,
         sl_atr_multiplier=1.5,
         tp_atr_multiplier=3.0,
-        volume_multiplier=1.3,
         use_vwap_filter=True,
-        cooldown_candles=5,
+        cooldown_candles=3,
         cpr_filter=cpr_filter,
     )
     strategy_engine.register(ema_strategy)
@@ -326,10 +325,9 @@ def main() -> None:
     supertrend_strategy = SuperTrendStrategy(
         instrument_tokens=config.instruments.exchange_tokens,
         atr_period=10,
-        multiplier=3.0,
-        ema_period=20,
+        multiplier=2.0,
         rr_ratio=2.0,
-        max_flips_in_window=3,
+        max_flips_in_window=4,
         chop_window=10,
         cpr_filter=cpr_filter,
     )
@@ -342,7 +340,7 @@ def main() -> None:
         bb_std=2.0,
         min_squeeze_candles=5,
         rr_ratio=1.5,
-        volume_multiplier=1.5,
+        volume_multiplier=1.2,
         use_vwap_filter=True,
         max_trades_per_day=2,
         cpr_filter=cpr_filter,
@@ -415,6 +413,18 @@ def main() -> None:
     # Start strategy engine (after warmup so indicators have context)
     strategy_engine.start()
 
+    # ─── Replay warmup history into BB_Squeeze state machine ─────
+    # BB_Squeeze needs to know if a squeeze was already in progress
+    # before the live session starts — replay historical candles through it.
+    if config.warmup.enabled and warmup_result and warmup_result.candles_loaded > 0:
+        from app.core.models import Timeframe as TF
+        for token in config.instruments.exchange_tokens:
+            history_5m = candle_builder.get_history(token, TF.M5)
+            if history_5m:
+                bb_squeeze_strategy.warmup_history(token, history_5m)
+    else:
+        logger.info("BB_Squeeze warmup replay skipped (no warmup data)")
+
     # ─── Calculate CPR from warmup data ──────────────────────────
     # CPR needs previous day's H/L/C — get from candle builder history
     if config.instruments.exchange_tokens:
@@ -448,6 +458,7 @@ def main() -> None:
         feed=feed,
         event_bus=event_bus,
         max_retries=config.reconnect.max_retries,
+        broker=broker,
     )
 
     def on_reconnect(info: dict) -> None:
