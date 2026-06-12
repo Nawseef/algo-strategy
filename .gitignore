@@ -23,4 +23,6 @@ Thumbs.db
 # Project
 logs/*.log
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/*.sqlite
