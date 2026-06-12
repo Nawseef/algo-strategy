@@ -385,6 +385,7 @@ def main() -> None:
     instruments: list[str] = list(INSTRUMENT_MAP.keys())
 
     i = 0
+    delay_ms = DEFAULT_DELAY_MS
     while i < len(args):
         if args[i] == "--from" and i + 1 < len(args):
             start_date = date.fromisoformat(args[i + 1])
@@ -396,7 +397,7 @@ def main() -> None:
             instruments = [x.strip().upper() for x in args[i + 1].split(",")]
             i += 2
         elif args[i] == "--delay" and i + 1 < len(args):
-            DEFAULT_DELAY_MS = int(args[i + 1])
+            delay_ms = int(args[i + 1])
             i += 2
         else:
             i += 1
@@ -408,7 +409,7 @@ def main() -> None:
     # Calculate estimated work
     total_days = (end_date - start_date).days
     est_chunks = (total_days // MAX_DAYS_PER_REQUEST + 1) * len(instruments)
-    est_time_s = est_chunks * (DEFAULT_DELAY_MS / 1000 + 0.5)
+    est_time_s = est_chunks * (delay_ms / 1000 + 0.5)
     print(f"  Estimated: ~{est_chunks} API calls, ~{est_time_s/60:.0f} minutes")
     print()
 
@@ -429,7 +430,7 @@ def main() -> None:
     store.start()
 
     # Create fetcher
-    fetcher = HistoricalFetcher(broker, store, delay_ms=DEFAULT_DELAY_MS)
+    fetcher = HistoricalFetcher(broker, store, delay_ms=delay_ms)
 
     # Fetch each instrument
     t0 = time.time()
