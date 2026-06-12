@@ -39,6 +39,7 @@ class _CandleState:
     volume: int = 0
     open_time_ms: float = 0.0
     tick_count: int = 0
+    last_tick_ms: float = 0.0  # Track last tick time for staleness detection
 
     def update(self, tick: Tick) -> None:
         """Update candle with a new tick."""
@@ -57,6 +58,7 @@ class _CandleState:
         self.close = price
         self.tick_count += 1
         self.volume += 1
+        self.last_tick_ms = tick.timestamp_ms
 
     def to_candle(self, timeframe: Timeframe) -> Candle:
         """Convert state to an immutable Candle."""
@@ -82,6 +84,7 @@ class _CandleState:
         self.volume = 0
         self.open_time_ms = open_time_ms
         self.tick_count = 0
+        self.last_tick_ms = 0.0
 
 
 class CandleBuilder:
@@ -142,9 +145,23 @@ class CandleBuilder:
             return
 
         if candle_open_time > state.open_time_ms and state.tick_count > 0:
-            # New candle period — emit the completed candle
-            completed = state.to_candle(timeframe=timeframe)
-            self._emit_candle(completed, key)
+            # New candle period — check if the previous candle is stale
+            # (e.g., feed dropped for multiple candle periods)
+            time_since_last_tick = tick.timestamp_ms - state.last_tick_ms
+            max_acceptable_gap = interval_ms * 2  # Allow up to 2× interval gap
+
+            if time_since_last_tick > max_acceptable_gap:
+                # Stale candle — too much time passed since last tick.
+                # Discard it (incomplete data from before a feed disconnection).
+                logger.warning(
+                    "Discarding stale candle for %s/%s (gap: %.0fs, threshold: %.0fs)",
+                    tick.exchange_token, timeframe.value,
+                    time_since_last_tick / 1000, max_acceptable_gap / 1000,
+                )
+            else:
+                # Normal candle completion — emit it
+                completed = state.to_candle(timeframe=timeframe)
+                self._emit_candle(completed, key)
 
             # Reset for new period
             state.reset(candle_open_time)
@@ -174,9 +191,10 @@ class CandleBuilder:
     ) -> None:
         """
         Pre-load historical candles into the history buffer.
-        Used by the warmup DataManager to seed indicators on startup.
+        Used by the warmup DataManager to seed indicators on startup,
+        and by the backtest replay to add candles sequentially.
 
-        Candles are inserted at the FRONT of existing history (oldest first).
+        Candles are APPENDED to existing history (maintaining chronological order).
         Duplicates (by timestamp) are skipped.
         """
         if not candles:
@@ -189,15 +207,15 @@ class CandleBuilder:
         existing = self._history[key]
         existing_timestamps = {c.timestamp_ms for c in existing}
 
-        # Filter out duplicates and prepend
+        # Filter out duplicates and append (maintaining chronological order)
         new_candles = [c for c in candles if c.timestamp_ms not in existing_timestamps]
         if new_candles:
-            self._history[key] = new_candles + existing
-            # Trim to max history
+            self._history[key] = existing + new_candles
+            # Trim to max history (keep most recent)
             if len(self._history[key]) > self._max_history:
                 self._history[key] = self._history[key][-self._max_history:]
 
-        logger.info(
+        logger.debug(
             "Injected %d historical candles for %s/%s (total: %d)",
             len(new_candles),
             exchange_token,
