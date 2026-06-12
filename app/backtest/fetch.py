@@ -264,7 +264,7 @@ class HistoricalFetcher:
                     groww_symbol=groww_symbol,
                     start_time=start_str,
                     end_time=end_str,
-                    candle_interval=f"{CANDLE_INTERVAL}",
+                    candle_interval=self._api.CANDLE_INTERVAL_MIN_5,
                 )
 
                 self._total_requests += 1
@@ -286,7 +286,7 @@ class HistoricalFetcher:
                                     groww_symbol=alt_symbol,
                                     start_time=start_str,
                                     end_time=end_str,
-                                    candle_interval=f"{CANDLE_INTERVAL}",
+                                    candle_interval=self._api.CANDLE_INTERVAL_MIN_5,
                                 )
                                 # Update the symbol in the map for future calls
                                 INSTRUMENT_MAP[instrument_name]["groww_symbol"] = alt_symbol
