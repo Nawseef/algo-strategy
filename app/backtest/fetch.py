@@ -327,10 +327,17 @@ class HistoricalFetcher:
         batch: list[tuple] = []
         dates_seen: set[str] = set()
 
+        skipped_none = 0
         for candle in candles_raw:
             # Backtesting API returns: [timestamp_str, open, high, low, close, volume, oi]
             # Timestamp format: "2025-09-24T10:30:00"
             ts_str = candle[0]
+
+            # Skip candles with None OHLC values (API returns incomplete data sometimes)
+            if ts_str is None or candle[1] is None or candle[2] is None or candle[3] is None or candle[4] is None:
+                skipped_none += 1
+                continue
+
             o = float(candle[1])
             h = float(candle[2])
             l = float(candle[3])
@@ -344,6 +351,9 @@ class HistoricalFetcher:
             dates_seen.add(session_date)
 
             batch.append((timestamp_ms, o, h, l, c, vol, session_date))
+
+        if skipped_none > 0:
+            logger.debug("  Skipped %d candles with None OHLC values for %s", skipped_none, instrument_name)
 
         # Write to DB in one batch
         if batch:
