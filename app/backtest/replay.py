@@ -224,6 +224,17 @@ class BacktestReplayEngine:
         else:
             indicator_engine.update_vix(14.0)  # Default if no VIX data
 
+        # ─── Load previous day's close for each instrument (for gap calc) ──
+        prev_day_end_ms = day_start_ms - 1  # just before today's open
+        prev_day_start_ms = prev_day_end_ms - (7 * 86400 * 1000)  # look back up to 7 days
+        prev_closes: dict[str, float] = {}
+        for token in self._instruments:
+            if token == self._vix_token:
+                continue
+            prev_candles = self._store.get_historical_candles(token, "5m", prev_day_start_ms, prev_day_end_ms)
+            if prev_candles:
+                prev_closes[token] = prev_candles[-1].get("close", 0.0)
+
         # ─── Load candles for each instrument ────────────────────────────
         day_trades = 0
 
@@ -265,9 +276,7 @@ class BacktestReplayEngine:
                 candle_builder.inject_history(token, Timeframe.M30, candles_30m)
 
             # ─── Process each candle (from candle 30 onwards) ────────────
-            # Use first candle's open as approximation for prev close
-            # (Actual prev day close would require additional DB queries that slow the backtest)
-            prev_close = candles_5m[0].open
+            prev_close = prev_closes.get(token, candles_5m[0].open)
             indicator_engine.set_prev_day_close(token, prev_close)
 
             for i, candle in enumerate(candles_5m[30:], start=30):
