@@ -38,6 +38,13 @@ logger = get_logger(__name__)
 
 # ─── Detect database mode ────────────────────────────────────────────────────
 
+# Ensure .env is loaded before reading DATABASE_URL
+# (only if DATABASE_URL isn't already set in environment)
+if not os.getenv("DATABASE_URL"):
+    from pathlib import Path as _Path
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(_Path(__file__).parent.parent.parent / ".env")
+
 _DATABASE_URL = os.getenv("DATABASE_URL", "")
 _USE_POSTGRES = _DATABASE_URL.startswith("postgresql://") or _DATABASE_URL.startswith("postgres://")
 
@@ -540,13 +547,19 @@ class ResearchStore:
         """
         Args:
             db_path: SQLite file path (used only for SQLite mode / tests).
+                     If provided, forces SQLite mode regardless of DATABASE_URL.
             database_url: Override DATABASE_URL (for programmatic use).
         """
-        self._database_url = database_url or _DATABASE_URL
-        self._use_postgres = (
-            self._database_url.startswith("postgresql://")
-            or self._database_url.startswith("postgres://")
-        )
+        # If db_path is explicitly passed, force SQLite (for tests)
+        if db_path is not None:
+            self._database_url = ""
+            self._use_postgres = False
+        else:
+            self._database_url = database_url or _DATABASE_URL
+            self._use_postgres = (
+                self._database_url.startswith("postgresql://")
+                or self._database_url.startswith("postgres://")
+            )
 
         # SQLite state
         self._sqlite_path = db_path or DEFAULT_SQLITE_PATH
