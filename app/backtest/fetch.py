@@ -106,12 +106,11 @@ INSTRUMENT_MAP = {
         "type": "stock",
     },
     "INDIAVIX": {
-        "groww_symbol": "NSE-INDIA VIX",  # will try alternatives if this fails
+        "groww_symbol": "NSE-INDIAVIX",
         "exchange": "NSE",
         "segment": "CASH",
         "exchange_token": "26017",
         "type": "index",
-        "alternatives": ["NSE-INDIAVIX", "NSE-India VIX"],
     },
 }
 
