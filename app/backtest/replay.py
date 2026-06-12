@@ -205,8 +205,7 @@ class BacktestReplayEngine:
         grouping_engine = GroupingEngine()
         tick_engine = TickTriggerEngine(armed_state, grouping_engine)
 
-        trade_recorder = TradeRecorder(self._store, flush_interval_seconds=9999)  # manual flush only
-        trade_recorder.start()
+        trade_recorder = TradeRecorder(self._store, flush_interval_seconds=0)  # No timer in backtest
 
         candle_cache = CandleCache(self._store)
         candle_cache._today_str = day_str
@@ -224,6 +223,17 @@ class BacktestReplayEngine:
             indicator_engine.update_vix(vix_value)
         else:
             indicator_engine.update_vix(14.0)  # Default if no VIX data
+
+        # ─── Load previous day's close for each instrument (for gap calc) ──
+        prev_day_end_ms = day_start_ms - 1  # just before today's open
+        prev_day_start_ms = prev_day_end_ms - (7 * 86400 * 1000)  # look back up to 7 days
+        prev_closes: dict[str, float] = {}
+        for token in self._instruments:
+            if token == self._vix_token:
+                continue
+            prev_candles = self._store.get_historical_candles(token, "5m", prev_day_start_ms, prev_day_end_ms)
+            if prev_candles:
+                prev_closes[token] = prev_candles[-1].get("close", 0.0)
 
         # ─── Load candles for each instrument ────────────────────────────
         day_trades = 0
@@ -266,19 +276,7 @@ class BacktestReplayEngine:
                 candle_builder.inject_history(token, Timeframe.M30, candles_30m)
 
             # ─── Process each candle (from candle 30 onwards) ────────────
-            # Get previous day's close for gap calculation
-            prev_day = trading_day - timedelta(days=1)
-            # Walk back to find a trading day
-            for _ in range(5):
-                prev_day_end_ms = datetime.combine(prev_day, dtime(15, 30)).timestamp() * 1000
-                prev_day_start_ms = datetime.combine(prev_day, dtime(9, 15)).timestamp() * 1000
-                prev_candles = self._store.get_historical_candles(token, "5m", prev_day_start_ms, prev_day_end_ms)
-                if prev_candles:
-                    prev_close = prev_candles[-1].get("close", candles_5m[0].open)
-                    break
-                prev_day -= timedelta(days=1)
-            else:
-                prev_close = candles_5m[0].open  # fallback
+            prev_close = prev_closes.get(token, candles_5m[0].open)
             indicator_engine.set_prev_day_close(token, prev_close)
 
             for i, candle in enumerate(candles_5m[30:], start=30):
