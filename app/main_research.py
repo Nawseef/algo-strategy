@@ -141,7 +141,10 @@ class ResearchOrchestrator:
         self._candle_counters: dict[tuple[str, ResearchTimeframe], int] = defaultdict(int)
 
         # ─── India VIX tracking ──────────────────────────────────────────
-        self._vix_value: float = 0.0
+        # Default to 14.0 (historical average) until first VIX tick arrives.
+        # Prevents VIX-filtered variants from being silently suppressed if feed drops.
+        self._vix_value: float = 14.0
+        self._indicator_engine.update_vix(14.0)
 
         # ─── Stats ───────────────────────────────────────────────────────
         self._total_evaluations: int = 0

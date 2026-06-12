@@ -215,22 +215,15 @@ class BacktestReplayEngine:
         candle_counters: dict[tuple[str, ResearchTimeframe], int] = defaultdict(int)
 
         # ─── Load VIX for this day ───────────────────────────────────────
-        vix_candles = self._store.get_historical_candles(self._vix_token, "5m", 0, 9999999999999)
-        # Filter to this day
         day_start_ms = datetime.combine(trading_day, dtime(9, 15)).timestamp() * 1000
         day_end_ms = datetime.combine(trading_day, dtime(15, 30)).timestamp() * 1000
-        vix_today = [c for c in vix_candles if day_start_ms <= c.get("timestamp_ms", 0) <= day_end_ms]
+
+        vix_today = self._store.get_historical_candles(self._vix_token, "5m", day_start_ms, day_end_ms)
         if vix_today:
-            vix_value = vix_today[0].get("close", 0)
+            vix_value = vix_today[0].get("close", 14.0)
             indicator_engine.update_vix(vix_value)
         else:
-            # Try daily range
-            vix_day = self._store.get_historical_candles(
-                self._vix_token, "5m",
-                day_start_ms, day_end_ms,
-            )
-            if vix_day:
-                indicator_engine.update_vix(vix_day[0].get("close", 14.0))
+            indicator_engine.update_vix(14.0)  # Default if no VIX data
 
         # ─── Load candles for each instrument ────────────────────────────
         day_trades = 0
@@ -273,17 +266,29 @@ class BacktestReplayEngine:
                 candle_builder.inject_history(token, Timeframe.M30, candles_30m)
 
             # ─── Process each candle (from candle 30 onwards) ────────────
-            prev_close = candles_5m[0].open  # for gap calc
+            # Get previous day's close for gap calculation
+            prev_day = trading_day - timedelta(days=1)
+            # Walk back to find a trading day
+            for _ in range(5):
+                prev_day_end_ms = datetime.combine(prev_day, dtime(15, 30)).timestamp() * 1000
+                prev_day_start_ms = datetime.combine(prev_day, dtime(9, 15)).timestamp() * 1000
+                prev_candles = self._store.get_historical_candles(token, "5m", prev_day_start_ms, prev_day_end_ms)
+                if prev_candles:
+                    prev_close = prev_candles[-1].get("close", candles_5m[0].open)
+                    break
+                prev_day -= timedelta(days=1)
+            else:
+                prev_close = candles_5m[0].open  # fallback
             indicator_engine.set_prev_day_close(token, prev_close)
 
             for i, candle in enumerate(candles_5m[30:], start=30):
                 # Cache for exit engine
                 candle_cache.on_candle(candle)
 
-                # Compute indicator snapshot
-                # First inject this candle into history so builder has it
+                # Inject candle into history for evaluator access
                 candle_builder.inject_history(token, Timeframe.M5, [candle])
 
+                # Compute indicator snapshot (handles dedup internally)
                 snapshot = indicator_engine.on_candle(candle)
                 if snapshot is None:
                     continue
@@ -352,18 +357,32 @@ class BacktestReplayEngine:
                     continue
                 candle_builder.inject_history(token, core_tf, tf_candles[:-1])
                 for candle in tf_candles[10:]:
-                    snapshot = indicator_engine.get_snapshot(token, ResearchTimeframe.M5)
+                    # Cache for exit engine
+                    candle_cache.on_candle(candle)
+
+                    # Inject into history and compute proper indicators for this TF
+                    candle_builder.inject_history(token, core_tf, [candle])
+                    snapshot = indicator_engine.on_candle(candle)
                     if snapshot is None:
-                        continue
+                        # Fall back to M5 snapshot if not enough history
+                        snapshot = indicator_engine.get_snapshot(token, ResearchTimeframe.M5)
+                        if snapshot is None:
+                            continue
+
                     metadata = indicator_engine.get_metadata(token)
                     counter_key = (token, rtf)
                     candle_counters[counter_key] += 1
+                    current_candle_idx = candle_counters[counter_key]
+
+                    # Cleanup expired for this timeframe
+                    armed_state.cleanup_expired(token, current_candle_idx, timeframe=rtf.value)
+
                     history = candle_builder.get_history(token, core_tf)
                     result = evaluator.evaluate(
                         instrument=token, timeframe=rtf,
                         candle=candle, history=history,
                         snapshot=snapshot, metadata=metadata,
-                        candle_index=candle_counters[counter_key],
+                        candle_index=current_candle_idx,
                     )
                     if result.immediate_trades:
                         trade_recorder.record_immediate_trades(
@@ -372,18 +391,17 @@ class BacktestReplayEngine:
                         )
                     if result.armed_variants:
                         armed_state.arm(result.armed_variants)
+                        # Rebuild groups so INTRABAR triggers can fire
+                        all_armed = armed_state.get_armed(token)
+                        grouping_engine.rebuild(token, all_armed)
 
         # ─── Flush trades and run exit engine ────────────────────────────
         trade_recorder.stop()
-        day_trades = self._store.get_trade_count_today()  # approximate
 
         # Run exit engine for this day
         stats = self._exit_engine.run_for_date(day_str)
 
-        # Cleanup candle cache for this day (data is now in exit_results)
-        # Keep it for now — the cache auto-cleans after 7 days
-
-        return stats.trades_processed if stats.trades_processed > 0 else day_trades
+        return stats.trades_processed if stats.trades_processed > 0 else 0
 
     def _generate_synthetic_ticks(self, token: str, candle: Candle) -> list[Tick]:
         """

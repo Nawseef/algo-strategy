@@ -90,6 +90,9 @@ class IndicatorEngine:
 
         self._last_metadata_date: str = ""
 
+        # Track latest candle timestamp for backtest-safe metadata
+        self._last_candle_timestamp_ms: float = 0.0
+
     # ─── Public API ──────────────────────────────────────────────────────────
 
     def on_candle(self, candle: Candle) -> IndicatorSnapshot | None:
@@ -114,8 +117,13 @@ class IndicatorEngine:
         if len(history) < 30:
             return None  # Not enough history for reliable indicators
 
-        # Include current candle in computation
-        all_candles = history[-50:] + [candle]
+        # Use history directly if the current candle is already at the end
+        # (CandleBuilder appends to history BEFORE emitting the event)
+        # Otherwise append it (backtest mode may inject after)
+        if history and history[-1].timestamp_ms == candle.timestamp_ms:
+            all_candles = history[-50:]
+        else:
+            all_candles = history[-50:] + [candle]
         closes = [c.close for c in all_candles]
 
         # ─── Compute all indicators ONCE ─────────────────────────────────
@@ -186,6 +194,9 @@ class IndicatorEngine:
         # Store snapshot
         self._snapshots[key] = snapshot
 
+        # Track latest candle timestamp for metadata derivation
+        self._last_candle_timestamp_ms = candle.timestamp_ms
+
         return snapshot
 
     def get_snapshot(
@@ -245,16 +256,31 @@ class IndicatorEngine:
         return current_volume / avg
 
     def _get_today_candles(self, candles: list[Candle]) -> list[Candle]:
-        """Filter to today's candles only (for VWAP calculation)."""
-        now = datetime.now()
-        market_open = datetime.combine(now.date(), dtime(9, 15))
+        """Filter to today's candles only (for VWAP calculation).
+        Uses the LAST candle's date to determine 'today' (works for both live and backtest).
+        """
+        if not candles:
+            return []
+        # Determine 'today' from the most recent candle in the list
+        last_candle_dt = datetime.fromtimestamp(candles[-1].timestamp_ms / 1000)
+        market_open = datetime.combine(last_candle_dt.date(), dtime(9, 15))
         open_ms = market_open.timestamp() * 1000
         return [c for c in candles if c.timestamp_ms >= open_ms]
 
     def _maybe_update_metadata(self, exchange_token: str) -> None:
         """Update metadata snapshot (session, gap, etc.)."""
-        today = datetime.now().strftime("%Y-%m-%d")
-        now = datetime.now().time()
+        # Derive date/time from last processed candle (backtest-safe)
+        if self._last_candle_timestamp_ms > 0:
+            candle_dt = datetime.fromtimestamp(self._last_candle_timestamp_ms / 1000)
+            today = candle_dt.strftime("%Y-%m-%d")
+            now = candle_dt.time()
+            day_of_week = candle_dt.strftime("%a").upper()[:3]
+            month = candle_dt.strftime("%b").upper()[:3]
+        else:
+            today = datetime.now().strftime("%Y-%m-%d")
+            now = datetime.now().time()
+            day_of_week = datetime.now().strftime("%a").upper()[:3]
+            month = datetime.now().strftime("%b").upper()[:3]
 
         # Determine session
         if MORNING_START <= now <= MORNING_END:
@@ -272,8 +298,8 @@ class IndicatorEngine:
 
         meta = self._metadata[exchange_token]
         meta.session = session
-        meta.day_of_week = datetime.now().strftime("%a").upper()[:3]
-        meta.month = datetime.now().strftime("%b").upper()[:3]
+        meta.day_of_week = day_of_week
+        meta.month = month
 
         # Gap (if we have prev day close and opening range)
         prev_close = self._prev_day_close.get(exchange_token, 0)
