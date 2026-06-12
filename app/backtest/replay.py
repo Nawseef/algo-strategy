@@ -205,7 +205,7 @@ class BacktestReplayEngine:
         grouping_engine = GroupingEngine()
         tick_engine = TickTriggerEngine(armed_state, grouping_engine)
 
-        trade_recorder = TradeRecorder(self._store, flush_interval_seconds=0)  # No timer in backtest
+        trade_recorder = TradeRecorder(self._store, flush_interval_seconds=0, max_buffer_size=50000)  # No timer, no mid-day flush in backtest
 
         candle_cache = CandleCache(self._store)
         candle_cache._today_str = day_str
