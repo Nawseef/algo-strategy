@@ -99,9 +99,9 @@ class TradeRecorder:
             self._seen_today.add(dedup_key)
             self._buffer.append(trade)
 
-            # Flush if buffer full
-            if len(self._buffer) >= self._max_buffer:
-                self._flush()
+        # Flush outside the lock if buffer is full
+        if len(self._buffer) >= self._max_buffer:
+            self._flush()
 
         return True
 
