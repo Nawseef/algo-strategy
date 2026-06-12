@@ -205,8 +205,7 @@ class BacktestReplayEngine:
         grouping_engine = GroupingEngine()
         tick_engine = TickTriggerEngine(armed_state, grouping_engine)
 
-        trade_recorder = TradeRecorder(self._store, flush_interval_seconds=9999)  # manual flush only
-        trade_recorder.start()
+        trade_recorder = TradeRecorder(self._store, flush_interval_seconds=0)  # No timer in backtest
 
         candle_cache = CandleCache(self._store)
         candle_cache._today_str = day_str
@@ -266,19 +265,9 @@ class BacktestReplayEngine:
                 candle_builder.inject_history(token, Timeframe.M30, candles_30m)
 
             # ─── Process each candle (from candle 30 onwards) ────────────
-            # Get previous day's close for gap calculation
-            prev_day = trading_day - timedelta(days=1)
-            # Walk back to find a trading day
-            for _ in range(5):
-                prev_day_end_ms = datetime.combine(prev_day, dtime(15, 30)).timestamp() * 1000
-                prev_day_start_ms = datetime.combine(prev_day, dtime(9, 15)).timestamp() * 1000
-                prev_candles = self._store.get_historical_candles(token, "5m", prev_day_start_ms, prev_day_end_ms)
-                if prev_candles:
-                    prev_close = prev_candles[-1].get("close", candles_5m[0].open)
-                    break
-                prev_day -= timedelta(days=1)
-            else:
-                prev_close = candles_5m[0].open  # fallback
+            # Use first candle's open as approximation for prev close
+            # (Actual prev day close would require additional DB queries that slow the backtest)
+            prev_close = candles_5m[0].open
             indicator_engine.set_prev_day_close(token, prev_close)
 
             for i, candle in enumerate(candles_5m[30:], start=30):
