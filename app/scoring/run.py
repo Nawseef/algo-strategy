@@ -35,11 +35,19 @@ def main() -> None:
     top_n = 50
     min_trades = 10
     cost_model_name = "equity_intraday"
+    from_date: str | None = None
+    to_date: str | None = None
 
     i = 0
     while i < len(args):
         if args[i] == "--days" and i + 1 < len(args):
             days = int(args[i + 1])
+            i += 2
+        elif args[i] == "--from" and i + 1 < len(args):
+            from_date = args[i + 1]
+            i += 2
+        elif args[i] == "--to" and i + 1 < len(args):
+            to_date = args[i + 1]
             i += 2
         elif args[i] == "--top" and i + 1 < len(args):
             top_n = int(args[i + 1])
@@ -53,14 +61,23 @@ def main() -> None:
         else:
             i += 1
 
-    # Period
+    # Period — support both --days (relative) and --from/--to (absolute)
     now = datetime.now()
-    end_ms = now.timestamp() * 1000
-    start_dt = now - timedelta(days=days)
-    start_ms = start_dt.timestamp() * 1000
-    period_label = f"{start_dt.strftime('%Y-%m-%d')}_to_{now.strftime('%Y-%m-%d')}"
+    if from_date:
+        start_dt = datetime.strptime(from_date, "%Y-%m-%d")
+    else:
+        start_dt = now - timedelta(days=days)
 
-    print(f"\n  Period: {start_dt.strftime('%Y-%m-%d')} → {now.strftime('%Y-%m-%d')} ({days} days)")
+    if to_date:
+        end_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+    else:
+        end_dt = now
+
+    start_ms = start_dt.timestamp() * 1000
+    end_ms = end_dt.timestamp() * 1000
+    period_label = f"{start_dt.strftime('%Y-%m-%d')}_to_{end_dt.strftime('%Y-%m-%d')}"
+
+    print(f"\n  Period: {start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}")
     print(f"  Min trades: {min_trades}")
     print(f"  Top N: {top_n}")
     print(f"  Cost model: {cost_model_name}")
