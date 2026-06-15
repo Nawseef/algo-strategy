@@ -2,12 +2,15 @@
 Mean Reversion strategy template.
 
 Logic:
-1. Determine trend context using VWAP (price above VWAP = uptrend context).
-2. Wait for RSI to reach extreme (oversold in uptrend, overbought in downtrend).
-3. Entry when RSI crosses back from extreme — momentum resumption toward mean.
+1. Price has overextended away from the mean (EMA20 used as mean proxy).
+   VWAP would be ideal but indices have no volume data, so EMA20 is universal.
+2. RSI confirms the overextension (oversold for longs, overbought for shorts).
+3. Entry when RSI crosses back from extreme — snap-back toward mean expected.
 4. Entry mode: CANDLE_CLOSE — RSI crossover is confirmed on candle close.
 
-This is the VWAP+RSI pullback concept — the textbook mean reversion setup.
+Key insight: Mean reversion = price is AWAY from the mean and reverting BACK.
+- LONG: Price BELOW EMA20 (by >0.3 ATR) + RSI recovering from oversold
+- SHORT: Price ABOVE EMA20 (by >0.3 ATR) + RSI dropping from overbought
 
 Output:
 - CandidateSignal with trigger_type=INDICATOR_EVENT
@@ -27,19 +30,24 @@ from app.variants.models import (
 )
 from app.variants.strategies.base_template import BaseStrategyTemplate, CandidateSignal
 
-# RSI levels (regime-adjusted per Cardwell method)
-# In uptrends, RSI stays in 40-80 range
-# In downtrends, RSI stays in 20-60 range
-RSI_OVERSOLD_IN_UPTREND = 40.0
-RSI_OVERBOUGHT_IN_DOWNTREND = 60.0
+# RSI thresholds for mean reversion
+RSI_OVERSOLD = 35.0
+RSI_OVERBOUGHT = 65.0
+
+# Minimum distance from EMA20 (in ATR units) to consider price "overextended"
+MIN_DISTANCE_ATR = 0.3
 
 
 class MeanReversionTemplate(BaseStrategyTemplate):
     """
-    Mean Reversion (VWAP + RSI Pullback) template.
+    Mean Reversion (EMA20 + RSI) template.
 
-    Detects when RSI reaches an extreme and crosses back,
-    signaling momentum resumption toward VWAP (the mean).
+    Detects when price has overextended away from EMA20 and RSI confirms
+    the extreme. Entry when RSI crosses back from the extreme zone,
+    betting on a snap-back toward the mean.
+
+    Uses EMA20 instead of VWAP because indices (NIFTY/BANKNIFTY) have
+    no volume data, making VWAP unreliable.
     """
 
     def __init__(self) -> None:
@@ -53,7 +61,7 @@ class MeanReversionTemplate(BaseStrategyTemplate):
 
     @property
     def warmup_candles(self) -> int:
-        return 30  # Need RSI(14) + ADX(14) to stabilize
+        return 30  # Need RSI(14) + EMA(20) to stabilize
 
     def evaluate(
         self,
@@ -83,16 +91,22 @@ class MeanReversionTemplate(BaseStrategyTemplate):
         if prev_rsi is None or rsi_val == 0:
             return []
 
+        # Need valid EMA20 and ATR
+        ema20 = snapshot.ema_20
+        atr_val = snapshot.atr
+        if ema20 == 0 or atr_val == 0:
+            return []
+
         candidates: list[CandidateSignal] = []
 
-        # Determine VWAP context
-        price_above_vwap = snapshot.price_vs_vwap > 0
-        price_below_vwap = snapshot.price_vs_vwap < 0
+        # Distance from mean (EMA20), normalized by ATR
+        distance_from_mean = (candle.close - ema20) / atr_val
 
-        # ─── Long: Uptrend context (above VWAP) + RSI recovers from oversold
-        if price_above_vwap:
-            # RSI was below oversold threshold and now crosses back above
-            if prev_rsi < RSI_OVERSOLD_IN_UPTREND and rsi_val >= RSI_OVERSOLD_IN_UPTREND:
+        # ─── Long: Price BELOW EMA20 (overextended down) + RSI recovering
+        # Price has fallen below the mean, RSI was oversold and is now
+        # crossing back up → expect reversion back up toward EMA20
+        if distance_from_mean < -MIN_DISTANCE_ATR:
+            if prev_rsi < RSI_OVERSOLD and rsi_val >= RSI_OVERSOLD:
                 candidates.append(
                     CandidateSignal(
                         direction=Direction.LONG,
@@ -103,17 +117,18 @@ class MeanReversionTemplate(BaseStrategyTemplate):
                         metadata={
                             "rsi": rsi_val,
                             "prev_rsi": prev_rsi,
-                            "vwap": snapshot.vwap,
-                            "price_vs_vwap": snapshot.price_vs_vwap,
-                            "setup": "RSI_RECOVERY_LONG",
+                            "ema20": ema20,
+                            "distance_atr": distance_from_mean,
+                            "setup": "MR_LONG_BELOW_EMA_RSI_RECOVERY",
                         },
                     )
                 )
 
-        # ─── Short: Downtrend context (below VWAP) + RSI drops from overbought
-        if price_below_vwap:
-            # RSI was above overbought threshold and now crosses back below
-            if prev_rsi > RSI_OVERBOUGHT_IN_DOWNTREND and rsi_val <= RSI_OVERBOUGHT_IN_DOWNTREND:
+        # ─── Short: Price ABOVE EMA20 (overextended up) + RSI dropping
+        # Price has risen above the mean, RSI was overbought and is now
+        # crossing back down → expect reversion back down toward EMA20
+        if distance_from_mean > MIN_DISTANCE_ATR:
+            if prev_rsi > RSI_OVERBOUGHT and rsi_val <= RSI_OVERBOUGHT:
                 candidates.append(
                     CandidateSignal(
                         direction=Direction.SHORT,
@@ -124,9 +139,9 @@ class MeanReversionTemplate(BaseStrategyTemplate):
                         metadata={
                             "rsi": rsi_val,
                             "prev_rsi": prev_rsi,
-                            "vwap": snapshot.vwap,
-                            "price_vs_vwap": snapshot.price_vs_vwap,
-                            "setup": "RSI_RECOVERY_SHORT",
+                            "ema20": ema20,
+                            "distance_atr": distance_from_mean,
+                            "setup": "MR_SHORT_ABOVE_EMA_RSI_DROP",
                         },
                     )
                 )

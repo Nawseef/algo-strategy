@@ -192,6 +192,13 @@ class BacktestReplayEngine:
         """
         Process one trading day through the full pipeline.
         Returns number of trades generated.
+
+        Warmup strategy (matches live mode):
+        - Load 50 candles from PREVIOUS trading day(s) into candle_builder
+        - This seeds the indicator engine so it produces valid snapshots
+          from the very first candle of the current day (9:15)
+        - Then process ALL of today's candles through the evaluator
+        - ORB sees 9:15-9:30 candles, builds range, fires breakout after 9:30
         """
         day_str = trading_day.strftime("%Y-%m-%d")
 
@@ -263,23 +270,41 @@ class BacktestReplayEngine:
 
             self._total_candles += len(candles_5m)
 
-            # ─── Inject history (first 30 candles for warmup) ────────────
-            warmup_candles = candles_5m[:30]
-            candle_builder.inject_history(token, Timeframe.M5, warmup_candles)
+            # ─── Warmup from PREVIOUS day (matches live mode) ────────────
+            # Load last 50 candles from previous trading days as indicator warmup.
+            # This ensures indicator engine has enough history to produce valid
+            # snapshots from the very first candle of the current day.
+            warmup_raw = self._store.get_historical_candles(
+                token, "5m", prev_day_start_ms, prev_day_end_ms
+            )
+            if warmup_raw:
+                # Take last 50 candles from previous days
+                warmup_raw = warmup_raw[-50:]
+                warmup_candles: list[Candle] = []
+                for c in warmup_raw:
+                    wc = Candle(
+                        exchange="NSE", segment="CASH", exchange_token=token,
+                        timeframe=Timeframe.M5,
+                        timestamp_ms=c["timestamp_ms"],
+                        open=c["open"], high=c["high"], low=c["low"], close=c["close"],
+                        volume=c.get("volume", 0),
+                    )
+                    warmup_candles.append(wc)
+                candle_builder.inject_history(token, Timeframe.M5, warmup_candles)
 
-            # Also inject for 15m and 30m (aggregate from 5m)
-            candles_15m = self._aggregate_candles(candles_5m[:30], 3, token, Timeframe.M15)
-            candles_30m = self._aggregate_candles(candles_5m[:30], 6, token, Timeframe.M30)
-            if candles_15m:
-                candle_builder.inject_history(token, Timeframe.M15, candles_15m)
-            if candles_30m:
-                candle_builder.inject_history(token, Timeframe.M30, candles_30m)
+                # Also build 15m/30m warmup from previous day candles
+                warmup_15m = self._aggregate_candles(warmup_candles, 3, token, Timeframe.M15)
+                warmup_30m = self._aggregate_candles(warmup_candles, 6, token, Timeframe.M30)
+                if warmup_15m:
+                    candle_builder.inject_history(token, Timeframe.M15, warmup_15m)
+                if warmup_30m:
+                    candle_builder.inject_history(token, Timeframe.M30, warmup_30m)
 
-            # ─── Process each candle (from candle 30 onwards) ────────────
+            # ─── Process ALL candles from 9:15 onwards ───────────────────
             prev_close = prev_closes.get(token, candles_5m[0].open)
             indicator_engine.set_prev_day_close(token, prev_close)
 
-            for i, candle in enumerate(candles_5m[30:], start=30):
+            for i, candle in enumerate(candles_5m):
                 # Cache for exit engine
                 candle_cache.on_candle(candle)
 
@@ -289,6 +314,24 @@ class BacktestReplayEngine:
                 # Compute indicator snapshot (handles dedup internally)
                 snapshot = indicator_engine.on_candle(candle)
                 if snapshot is None:
+                    # Not enough history for indicators yet (first day of backtest
+                    # with no previous data). Still call evaluator so ORB can build
+                    # its opening range. Filters will block everything since
+                    # indicators are all 0, but ORB template only needs OHLC.
+                    metadata = indicator_engine.get_metadata(token)
+                    history = candle_builder.get_history(token, Timeframe.M5)
+                    minimal_snapshot = IndicatorSnapshot()
+                    for rtf in [ResearchTimeframe.M5]:
+                        counter_key = (token, rtf)
+                        candle_counters[counter_key] += 1
+                        current_candle_idx = candle_counters[counter_key]
+                        armed_state.cleanup_expired(token, current_candle_idx, timeframe=rtf.value)
+                        evaluator.evaluate(
+                            instrument=token, timeframe=rtf,
+                            candle=candle, history=history,
+                            snapshot=minimal_snapshot, metadata=metadata,
+                            candle_index=current_candle_idx,
+                        )
                     continue
 
                 # Get metadata
@@ -343,7 +386,6 @@ class BacktestReplayEngine:
                             trade_recorder.record_tick_trades(triggered)
 
             # Also process 15m and 30m evaluations
-            # (simplified: evaluate on every 3rd/6th 5m candle)
             candles_15m_full = self._aggregate_candles(candles_5m, 3, token, Timeframe.M15)
             candles_30m_full = self._aggregate_candles(candles_5m, 6, token, Timeframe.M30)
 
@@ -351,10 +393,11 @@ class BacktestReplayEngine:
                 (candles_15m_full, ResearchTimeframe.M15, Timeframe.M15),
                 (candles_30m_full, ResearchTimeframe.M30, Timeframe.M30),
             ]:
-                if len(tf_candles) < 10:
+                if len(tf_candles) < 5:
                     continue
+                # Inject all but last as history, then process each
                 candle_builder.inject_history(token, core_tf, tf_candles[:-1])
-                for candle in tf_candles[10:]:
+                for candle in tf_candles:
                     # Cache for exit engine
                     candle_cache.on_candle(candle)
 
