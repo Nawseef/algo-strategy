@@ -137,6 +137,26 @@ class ExitSimulationEngine:
             logger.debug("No candle path for trade %s (%s %s)", trade_id, instrument, timeframe)
             return False
 
+        # ─── Skip entry candle for CANDLE_CLOSE trades ───────────────────
+        # CANDLE_CLOSE trades enter at the candle's close price. The candle's
+        # low/high includes price action BEFORE entry. Including it in the exit
+        # path would incorrectly trigger stops on pre-entry price moves.
+        #
+        # Detection: if the first candle's timestamp matches entry_time_ms AND
+        # entry_price matches that candle's close, it's a CANDLE_CLOSE entry.
+        # Skip it and start the exit path from the next candle.
+        if candle_path_raw and candle_path_raw[0].get("timestamp_ms") == entry_time_ms:
+            first_candle_close = candle_path_raw[0].get("close", 0)
+            # Use small tolerance for float comparison
+            if abs(first_candle_close - entry_price) < 0.01:
+                # CANDLE_CLOSE trade — skip entry candle
+                candle_path_raw = candle_path_raw[1:]
+
+        if not candle_path_raw:
+            # Only had the entry candle (last candle of the day) — no path to simulate
+            logger.debug("No post-entry candles for trade %s", trade_id)
+            return False
+
         # Convert to simple dicts with OHLCV keys
         candle_path = [
             {
