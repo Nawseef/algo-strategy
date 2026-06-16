@@ -299,6 +299,10 @@ class BacktestReplayEngine:
                     candle_builder.inject_history(token, Timeframe.M15, warmup_15m)
                 if warmup_30m:
                     candle_builder.inject_history(token, Timeframe.M30, warmup_30m)
+                    # Run 30m warmup candles through on_candle so indicator engine
+                    # computes M30 EMA snapshots needed for htf_trend_1h
+                    for wc30 in warmup_30m:
+                        indicator_engine.on_candle(wc30)
 
             # ─── Process ALL candles from 9:15 onwards ───────────────────
             prev_close = prev_closes.get(token, candles_5m[0].open)
@@ -307,6 +311,12 @@ class BacktestReplayEngine:
             for i, candle in enumerate(candles_5m):
                 # Cache for exit engine
                 candle_cache.on_candle(candle)
+
+                # Update opening range (9:15 - 9:30 = first 3 x 5m candles)
+                # Needed for gap_direction and opening_range_size in metadata
+                candle_dt = datetime.fromtimestamp(candle.timestamp_ms / 1000)
+                if dtime(9, 15) <= candle_dt.time() <= dtime(9, 30):
+                    indicator_engine.update_opening_range(token, candle)
 
                 # Inject candle into history for evaluator access
                 candle_builder.inject_history(token, Timeframe.M5, [candle])
