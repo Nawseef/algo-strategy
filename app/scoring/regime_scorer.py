@@ -13,9 +13,24 @@ Conditions (dimensions):
 The output is a regime→variant mapping table:
   (instrument, volatility, structure, session) → best variant + exit model
 
+NEW in v2:
+  --min-freq 15         Minimum trades per month (hard filter, default 0 = off)
+  --instruments bnf     Only score specific instruments:
+                          bnf       → BANKNIFTY only (26009)
+                          nf        → NIFTY only (26000)
+                          indices   → NIFTY + BANKNIFTY
+                          stocks    → all 8 stock futures
+                          all       → all 10 instruments (default)
+                          or pass comma-separated tokens: 26000,26009,2885
+  --cost futures        Cost model: none, equity_intraday, futures (default), options
+
 Usage:
-    python -m app.scoring.regime_scorer --from 2021-01-01 --to 2024-12-31 --top 5
-    python -m app.scoring.regime_scorer --from 2021-01-01 --to 2024-12-31 --validate 2025-01-01 --validate-to 2026-06-12
+    python -m app.scoring.regime_scorer --from 2021-01-01 --to 2024-12-31
+    python -m app.scoring.regime_scorer --from 2021-01-01 --to 2024-12-31 \\
+        --instruments indices --cost futures --min-freq 15 --top 5
+    python -m app.scoring.regime_scorer --from 2021-01-01 --to 2024-12-31 \\
+        --validate-from 2025-01-01 --validate-to 2026-06-12 \\
+        --instruments bnf --cost futures --min-freq 20
 """
 
 from __future__ import annotations
@@ -29,7 +44,7 @@ from itertools import product
 
 from app.db.research_store import ResearchStore
 from app.scoring.metrics import compute_metrics, VariantMetrics
-from app.scoring.costs import get_cost_model, CostModel
+from app.scoring.costs import get_cost_model, CostModel, COST_FUTURES
 from app.utils.logger import get_logger
 
 logger = get_logger("regime_scorer")
@@ -37,7 +52,7 @@ logger = get_logger("regime_scorer")
 
 # ─── Condition dimensions ────────────────────────────────────────────────────
 
-INSTRUMENTS = {
+ALL_INSTRUMENTS = {
     "26000": "NIFTY",
     "26009": "BANKNIFTY",
     "2885": "RELIANCE",
@@ -48,6 +63,32 @@ INSTRUMENTS = {
     "1594": "INFY",
     "11536": "TCS",
     "10604": "BHARTIARTL",
+}
+
+# Keep backward-compat alias
+INSTRUMENTS = ALL_INSTRUMENTS
+
+# Named instrument presets
+INSTRUMENT_PRESETS: dict[str, list[str]] = {
+    "bnf":     ["26009"],
+    "nf":      ["26000"],
+    "indices": ["26000", "26009"],
+    "stocks":  ["2885", "1333", "4963", "3045", "5900", "1594", "11536", "10604"],
+    "all":     list(ALL_INSTRUMENTS.keys()),
+}
+
+# Per-instrument futures cost in points (round-trip)
+FUTURES_COST_POINTS: dict[str, float] = {
+    "26000": 17.0,   # NIFTY
+    "26009": 28.0,   # BANKNIFTY
+    "2885": 5.0,     # RELIANCE
+    "1333": 5.0,     # HDFCBANK
+    "4963": 5.0,     # ICICIBANK
+    "3045": 5.0,     # SBIN
+    "5900": 5.0,     # AXISBANK
+    "1594": 5.0,     # INFY
+    "11536": 5.0,    # TCS
+    "10604": 5.0,    # BHARTIARTL
 }
 
 VOLATILITY_REGIMES = ["HIGH", "NORMAL", "LOW"]
@@ -126,6 +167,9 @@ class ConditionWinner:
     max_drawdown: float = 0.0
     sharpe_ratio: float = 0.0
 
+    # Frequency
+    trades_per_month: float = 0.0  # average monthly trade count
+
     # Composite score for this condition
     score: float = 0.0
 
@@ -173,6 +217,11 @@ class RegimeScorer:
        - Score and rank
     2. Output: top N variants per condition
     3. Optionally: forward walk validate (train vs test period)
+
+    New parameters:
+        instruments: list of token strings to score (default: all)
+        min_trades_per_month: hard filter on trade frequency (default: 0 = off)
+        train_months: number of months in the train window (auto-calculated from dates)
     """
 
     def __init__(
@@ -180,12 +229,27 @@ class RegimeScorer:
         store: ResearchStore,
         min_trades: int = 30,
         top_per_condition: int = 5,
-        cost_model_name: str = "none",
+        cost_model_name: str = "futures",
+        instruments: list[str] | None = None,
+        min_trades_per_month: float = 0.0,
     ):
         self._store = store
         self._min_trades = min_trades
         self._top_n = top_per_condition
+        self._cost_model_name = cost_model_name
         self._cost_model = get_cost_model(cost_model_name)
+        # Instrument filter — default to all if not specified
+        self._instruments = instruments if instruments else list(ALL_INSTRUMENTS.keys())
+        self._min_trades_per_month = min_trades_per_month
+        self._train_months: float = 0.0  # set when score_all_conditions is called
+
+    def _cost_for_instrument(self, token: str) -> float:
+        """Get per-trade cost in points for a specific token."""
+        if self._cost_model_name == "futures":
+            return FUTURES_COST_POINTS.get(token, 5.0)
+        # Fall back to the CostModel's name-based lookup with instrument name
+        inst_name = ALL_INSTRUMENTS.get(token, token)
+        return self._cost_model.cost_per_trade_points(inst_name)
 
     def score_all_conditions(
         self,
@@ -197,20 +261,41 @@ class RegimeScorer:
 
         Returns dict mapping each condition to its top N variants.
         """
+        # Calculate number of months in training window (for frequency filter)
+        start_dt = datetime.fromtimestamp(start_ms / 1000)
+        end_dt = datetime.fromtimestamp(end_ms / 1000)
+        self._train_months = max(
+            1.0,
+            (end_dt - start_dt).days / 30.44,
+        )
+        # Derive min_trades from frequency requirement
+        effective_min = self._min_trades
+        if self._min_trades_per_month > 0:
+            freq_min = int(self._min_trades_per_month * self._train_months)
+            effective_min = max(self._min_trades, freq_min)
+
         results: dict[ConditionKey, list[ConditionWinner]] = {}
         total_conditions = (
-            len(INSTRUMENTS) * len(VOLATILITY_REGIMES)
+            len(self._instruments) * len(VOLATILITY_REGIMES)
             * len(MARKET_STRUCTURES) * len(SESSIONS)
         )
         processed = 0
         found = 0
 
-        print(f"\n  Scoring {total_conditions} condition combinations...")
-        print(f"  Min trades per condition: {self._min_trades}")
+        freq_label = (
+            f", min freq={self._min_trades_per_month:.0f}/month"
+            f" (={effective_min} trades)"
+            if self._min_trades_per_month > 0 else ""
+        )
+        inst_names = [ALL_INSTRUMENTS.get(t, t) for t in self._instruments]
+        print(f"\n  Instruments:  {', '.join(inst_names)}")
+        print(f"  Scoring {total_conditions} condition combinations...")
+        print(f"  Min trades: {effective_min} ({self._train_months:.1f} months){freq_label}")
         print(f"  Top N per condition: {self._top_n}")
+        print(f"  Cost model: {self._cost_model_name}")
         print()
 
-        for inst in INSTRUMENTS.keys():
+        for inst in self._instruments:
             for vol in VOLATILITY_REGIMES:
                 for struct in MARKET_STRUCTURES:
                     for sess in SESSIONS:
@@ -223,7 +308,7 @@ class RegimeScorer:
                         )
 
                         winners = self._score_condition(
-                            condition, start_ms, end_ms
+                            condition, start_ms, end_ms, effective_min
                         )
 
                         if winners:
@@ -245,15 +330,18 @@ class RegimeScorer:
         condition: ConditionKey,
         start_ms: float,
         end_ms: float,
+        effective_min: int | None = None,
     ) -> list[ConditionWinner]:
         """
         Score all variants for a single condition.
         Returns top N winners sorted by composite score.
         """
+        min_trades = effective_min if effective_min is not None else self._min_trades
+
         # Load trades matching this condition
         trades = self._load_condition_trades(condition, start_ms, end_ms)
 
-        if len(trades) < self._min_trades:
+        if len(trades) < min_trades:
             return []
 
         # Group by variant_id
@@ -267,11 +355,11 @@ class RegimeScorer:
         candidates: list[ConditionWinner] = []
 
         for variant_id, vtrades in variant_groups.items():
-            if len(vtrades) < self._min_trades:
+            if len(vtrades) < min_trades:
                 continue
 
             winner = self._score_variant_for_condition(
-                variant_id, vtrades, condition
+                variant_id, vtrades, condition, min_trades
             )
             if winner is not None:
                 candidates.append(winner)
@@ -285,10 +373,13 @@ class RegimeScorer:
         variant_id: str,
         trades: list[dict],
         condition: ConditionKey,
+        min_trades: int | None = None,
     ) -> ConditionWinner | None:
         """Score a single variant under a specific condition."""
+        mt = min_trades if min_trades is not None else self._min_trades
+
         # Find best exit model for THIS condition's trades
-        best_exit, best_exp = self._find_best_exit(trades)
+        best_exit, best_exp = self._find_best_exit(trades, mt)
         if best_exit is None or best_exp <= 0:
             return None
 
@@ -297,19 +388,22 @@ class RegimeScorer:
             t.get(best_exit, 0.0) for t in trades
             if t.get(best_exit) is not None
         ]
-        if len(pnl_values) < self._min_trades:
+        if len(pnl_values) < mt:
             return None
 
         metrics = compute_metrics(pnl_values)
         if metrics.expectancy <= 0:
             return None
 
-        # Compute composite score
-        score = self._composite_score(metrics, len(pnl_values))
+        # Calculate trades per month
+        months = self._train_months if self._train_months > 0 else 1.0
+        trades_per_month = len(pnl_values) / months
 
-        # After-cost metrics
-        instrument = condition.instrument
-        cost = self._cost_model.cost_per_trade_points(instrument)
+        # Compute composite score (now includes frequency bonus)
+        score = self._composite_score(metrics, len(pnl_values), trades_per_month)
+
+        # After-cost metrics using token-based cost
+        cost = self._cost_for_instrument(condition.instrument)
         net_exp = metrics.expectancy - cost
         profitable = net_exp > 0
 
@@ -326,21 +420,23 @@ class RegimeScorer:
             net_pnl=metrics.net_pnl,
             max_drawdown=metrics.max_drawdown,
             sharpe_ratio=metrics.sharpe_ratio,
+            trades_per_month=trades_per_month,
             score=score,
             net_expectancy=net_exp,
             profitable_after_costs=profitable,
         )
 
     def _find_best_exit(
-        self, trades: list[dict]
+        self, trades: list[dict], min_trades: int | None = None
     ) -> tuple[str | None, float]:
         """Find exit model with highest expectancy for these trades."""
+        mt = min_trades if min_trades is not None else self._min_trades
         best_col = None
         best_exp = 0.0
 
         for col in EXIT_MODEL_COLUMNS:
             pnls = [t.get(col) for t in trades if t.get(col) is not None]
-            if len(pnls) < self._min_trades:
+            if len(pnls) < mt:
                 continue
             metrics = compute_metrics(pnls)
             if metrics.expectancy > best_exp:
@@ -350,21 +446,23 @@ class RegimeScorer:
         return best_col, best_exp
 
     def _composite_score(
-        self, metrics: VariantMetrics, trade_count: int
+        self, metrics: VariantMetrics, trade_count: int,
+        trades_per_month: float = 0.0,
     ) -> float:
         """
         Composite score for condition-specific ranking.
 
         Weights:
-          - Expectancy (40%): how much you make per trade
-          - Win rate (25%): consistency of winning
-          - Profit factor (20%): risk-reward balance
-          - Sharpe (15%): risk-adjusted return
+          - Expectancy (35%): how much you make per trade
+          - Win rate (20%): consistency of winning
+          - Profit factor (15%): risk-reward balance
+          - Sharpe (10%): risk-adjusted return
+          - Monthly income (20%): expectancy × frequency (rewards high-freq strategies)
 
         Multiplied by confidence factor based on sample size.
         """
-        # Normalize expectancy (0-50 pts range typical)
-        norm_exp = min(metrics.expectancy / 50.0, 1.0) if metrics.expectancy > 0 else 0.0
+        # Normalize expectancy (0-100 pts range — BNF can go high)
+        norm_exp = min(metrics.expectancy / 100.0, 1.0) if metrics.expectancy > 0 else 0.0
 
         # Normalize win rate (50% = break even, 80%+ = excellent)
         norm_wr = max(0, (metrics.win_rate - 0.4) / 0.5)  # 40%→0, 90%→1
@@ -377,11 +475,17 @@ class RegimeScorer:
         # Normalize sharpe (0-2 range)
         norm_sharpe = min(max(metrics.sharpe_ratio, 0) / 2.0, 1.0)
 
+        # Monthly income = expectancy × trades_per_month
+        # Normalize: 0 pts/month → 0, 1000 pts/month → 1.0
+        monthly_income = max(0, metrics.expectancy * trades_per_month)
+        norm_monthly = min(monthly_income / 1000.0, 1.0)
+
         raw = (
-            0.40 * norm_exp
-            + 0.25 * norm_wr
-            + 0.20 * norm_pf
-            + 0.15 * norm_sharpe
+            0.35 * norm_exp
+            + 0.20 * norm_wr
+            + 0.15 * norm_pf
+            + 0.10 * norm_sharpe
+            + 0.20 * norm_monthly  # rewards frequency
         )
 
         # Confidence: sqrt(trades / 100), capped at 1.0
@@ -565,7 +669,9 @@ def main() -> None:
     val_to: str | None = None
     top_n = 5
     min_trades = 30
-    cost_model_name = "none"
+    cost_model_name = "futures"
+    instruments_arg: str = "all"
+    min_freq: float = 0.0
 
     i = 0
     while i < len(args):
@@ -590,6 +696,12 @@ def main() -> None:
         elif args[i] == "--cost" and i + 1 < len(args):
             cost_model_name = args[i + 1]
             i += 2
+        elif args[i] == "--instruments" and i + 1 < len(args):
+            instruments_arg = args[i + 1]
+            i += 2
+        elif args[i] == "--min-freq" and i + 1 < len(args):
+            min_freq = float(args[i + 1])
+            i += 2
         else:
             i += 1
 
@@ -597,9 +709,38 @@ def main() -> None:
         print("\n  ERROR: --from and --to are required")
         print("  Usage: python -m app.scoring.regime_scorer "
               "--from 2021-01-01 --to 2024-12-31")
-        print("         [--validate-from 2025-01-01 --validate-to 2026-06-12]")
-        print("         [--top 5] [--min-trades 30] [--cost none]")
+        print()
+        print("  Options:")
+        print("    --instruments  bnf|nf|indices|stocks|all|26000,26009,...")
+        print("    --cost         none|equity_intraday|futures|options")
+        print("    --min-freq     N   (minimum trades per month, e.g. 15)")
+        print("    --min-trades   N   (minimum total trades per condition, default 30)")
+        print("    --top          N   (top N variants per condition, default 5)")
+        print("    --validate-from / --validate-to  (forward walk dates)")
+        print()
+        print("  Examples:")
+        print("    # BNF+NF only, futures costs, min 15 trades/month")
+        print("    python -m app.scoring.regime_scorer \\")
+        print("        --from 2021-01-01 --to 2024-12-31 \\")
+        print("        --instruments indices --cost futures --min-freq 15")
+        print()
+        print("    # All instruments, no cost filter, no freq filter")
+        print("    python -m app.scoring.regime_scorer \\")
+        print("        --from 2021-01-01 --to 2024-12-31 --cost none")
         return
+
+    # Resolve instrument list
+    if instruments_arg in INSTRUMENT_PRESETS:
+        instrument_tokens = INSTRUMENT_PRESETS[instruments_arg]
+    else:
+        # Comma-separated token list
+        instrument_tokens = [t.strip() for t in instruments_arg.split(",") if t.strip()]
+        # Validate
+        unknown = [t for t in instrument_tokens if t not in ALL_INSTRUMENTS]
+        if unknown:
+            print(f"\n  ERROR: Unknown instrument tokens: {unknown}")
+            print(f"  Valid tokens: {list(ALL_INSTRUMENTS.keys())}")
+            return
 
     # Parse dates
     start_dt = datetime.strptime(from_date, "%Y-%m-%d")
@@ -609,13 +750,16 @@ def main() -> None:
     start_ms = start_dt.timestamp() * 1000
     end_ms = end_dt.timestamp() * 1000
 
-    print(f"\n  Train period: {from_date} → {to_date}")
-    print(f"  Min trades:   {min_trades}")
-    print(f"  Top N/cond:   {top_n}")
-    print(f"  Cost model:   {cost_model_name}")
+    inst_names = [ALL_INSTRUMENTS.get(t, t) for t in instrument_tokens]
+    print(f"\n  Train period:    {from_date} → {to_date}")
+    print(f"  Instruments:     {', '.join(inst_names)} ({len(instrument_tokens)} total)")
+    print(f"  Cost model:      {cost_model_name}")
+    print(f"  Min trades:      {min_trades}")
+    print(f"  Min freq:        {min_freq:.0f}/month" if min_freq > 0 else "  Min freq:        off")
+    print(f"  Top N/cond:      {top_n}")
 
     if val_from and val_to:
-        print(f"  Validate:     {val_from} → {val_to}")
+        print(f"  Validate:        {val_from} → {val_to}")
 
     # Setup
     store = ResearchStore()
@@ -626,6 +770,8 @@ def main() -> None:
         min_trades=min_trades,
         top_per_condition=top_n,
         cost_model_name=cost_model_name,
+        instruments=instrument_tokens,
+        min_trades_per_month=min_freq,
     )
 
     # Score all conditions
@@ -683,7 +829,8 @@ def _print_results(
                 f"[{winner.exit_model:20s}] "
                 f"WR={winner.win_rate*100:.0f}% "
                 f"E={winner.expectancy:.1f} "
-                f"PF={winner.profit_factor:.1f} "
+                f"net={winner.net_expectancy:.1f} "
+                f"freq={winner.trades_per_month:.1f}/mo "
                 f"N={winner.trade_count:4d} "
                 f"S={winner.score:.0f} "
                 f"{cost_marker}"
