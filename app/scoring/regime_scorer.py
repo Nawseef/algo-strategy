@@ -170,6 +170,14 @@ class ConditionWinner:
     # Frequency
     trades_per_month: float = 0.0  # average monthly trade count
 
+    # Stability
+    stability_score: float = 0.0   # 0-100, higher = more consistent across months
+
+    # Risk profile
+    avg_mfe: float = 0.0           # avg max favorable excursion (how far it goes right)
+    avg_mae: float = 0.0           # avg max adverse excursion (how far it goes wrong)
+    max_consecutive_losses: int = 0
+
     # Composite score for this condition
     score: float = 0.0
 
@@ -395,17 +403,40 @@ class RegimeScorer:
         if metrics.expectancy <= 0:
             return None
 
+        # ─── Stability check ─────────────────────────────────────────────
+        # Penalise variants that earned everything in one lucky period.
+        # Split trades into monthly windows and check consistency.
+        from app.scoring.stability import compute_stability
+        stability = compute_stability(trades, best_exit, "monthly")
+
+        # Hard filter: must be profitable in at least 40% of months
+        # (avoids lucky one-month wonders with long dead periods)
+        if stability.periods_analyzed >= 3:
+            profitable_ratio = (
+                stability.periods_profitable / stability.periods_analyzed
+            )
+            if profitable_ratio < 0.40:
+                return None
+
         # Calculate trades per month
         months = self._train_months if self._train_months > 0 else 1.0
         trades_per_month = len(pnl_values) / months
 
-        # Compute composite score (now includes frequency bonus)
-        score = self._composite_score(metrics, len(pnl_values), trades_per_month)
+        # Compute composite score with stability baked in
+        score = self._composite_score(
+            metrics, len(pnl_values), trades_per_month, stability.stability_score
+        )
 
         # After-cost metrics using token-based cost
         cost = self._cost_for_instrument(condition.instrument)
         net_exp = metrics.expectancy - cost
         profitable = net_exp > 0
+
+        # ─── MFE/MAE edge ratio ──────────────────────────────────────────
+        mfe_vals = [t.get("mfe", 0) for t in trades if t.get("mfe") is not None]
+        mae_vals = [t.get("mae", 0) for t in trades if t.get("mae") is not None]
+        avg_mfe = sum(mfe_vals) / len(mfe_vals) if mfe_vals else 0.0
+        avg_mae = sum(mae_vals) / len(mae_vals) if mae_vals else 0.0
 
         return ConditionWinner(
             condition=condition,
@@ -421,6 +452,10 @@ class RegimeScorer:
             max_drawdown=metrics.max_drawdown,
             sharpe_ratio=metrics.sharpe_ratio,
             trades_per_month=trades_per_month,
+            stability_score=stability.stability_score,
+            avg_mfe=avg_mfe,
+            avg_mae=avg_mae,
+            max_consecutive_losses=metrics.max_consecutive_losses,
             score=score,
             net_expectancy=net_exp,
             profitable_after_costs=profitable,
@@ -448,16 +483,18 @@ class RegimeScorer:
     def _composite_score(
         self, metrics: VariantMetrics, trade_count: int,
         trades_per_month: float = 0.0,
+        stability_score: float = 50.0,
     ) -> float:
         """
         Composite score for condition-specific ranking.
 
         Weights:
-          - Expectancy (35%): how much you make per trade
-          - Win rate (20%): consistency of winning
-          - Profit factor (15%): risk-reward balance
+          - Expectancy (30%): how much you make per trade
+          - Win rate (15%): consistency of winning
+          - Profit factor (10%): risk-reward balance
           - Sharpe (10%): risk-adjusted return
-          - Monthly income (20%): expectancy × frequency (rewards high-freq strategies)
+          - Monthly income (15%): expectancy × frequency
+          - Stability (20%): consistency across time periods
 
         Multiplied by confidence factor based on sample size.
         """
@@ -476,16 +513,19 @@ class RegimeScorer:
         norm_sharpe = min(max(metrics.sharpe_ratio, 0) / 2.0, 1.0)
 
         # Monthly income = expectancy × trades_per_month
-        # Normalize: 0 pts/month → 0, 1000 pts/month → 1.0
         monthly_income = max(0, metrics.expectancy * trades_per_month)
         norm_monthly = min(monthly_income / 1000.0, 1.0)
 
+        # Stability (0-100 → 0-1)
+        norm_stability = stability_score / 100.0
+
         raw = (
-            0.35 * norm_exp
-            + 0.20 * norm_wr
-            + 0.15 * norm_pf
+            0.30 * norm_exp
+            + 0.15 * norm_wr
+            + 0.10 * norm_pf
             + 0.10 * norm_sharpe
-            + 0.20 * norm_monthly  # rewards frequency
+            + 0.15 * norm_monthly
+            + 0.20 * norm_stability   # rewards temporal consistency
         )
 
         # Confidence: sqrt(trades / 100), capped at 1.0
@@ -831,6 +871,9 @@ def _print_results(
                 f"E={winner.expectancy:.1f} "
                 f"net={winner.net_expectancy:.1f} "
                 f"freq={winner.trades_per_month:.1f}/mo "
+                f"stab={winner.stability_score:.0f} "
+                f"MFE={winner.avg_mfe:.0f} MAE={winner.avg_mae:.0f} "
+                f"maxL={winner.max_consecutive_losses} "
                 f"N={winner.trade_count:4d} "
                 f"S={winner.score:.0f} "
                 f"{cost_marker}"
