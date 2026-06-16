@@ -692,7 +692,7 @@ def _print_results(
         print(f"  └───")
 
     # Summary stats
-    all_winners = [w[0] for ws in results.values() for w in [ws[0]] if ws]
+    all_winners = [ws[0] for ws in results.values() if ws]
     if all_winners:
         print(f"\n  ── Summary ──")
         print(f"  Total conditions with winners: {len(results)}")
