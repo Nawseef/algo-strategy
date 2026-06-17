@@ -329,15 +329,17 @@ class IndicatorEngine:
             else:
                 meta.volatility_regime = "HIGH"
 
-        # Higher timeframe trend (from EMA alignment on longest timeframe available)
+        # Higher timeframe trend (from EMA slopes — matches backtest SQL derivation)
+        # Uses slope direction only (not position) for consistency between
+        # backtest post-fill and live computation.
         snapshot_30m = self._snapshots.get(
             (exchange_token, ResearchTimeframe.M30)
         )
-        if snapshot_30m and snapshot_30m.ema_20 > 0 and snapshot_30m.ema_50 > 0:
-            if snapshot_30m.ema_20 > snapshot_30m.ema_50 and snapshot_30m.ema_20_slope > 0:
+        if snapshot_30m and snapshot_30m.ema_20_slope != 0:
+            if snapshot_30m.ema_20_slope > 0 and snapshot_30m.ema_50_slope > 0:
                 meta.htf_trend_1h = "BULLISH"
                 meta.higher_timeframe_bias = "BULLISH"
-            elif snapshot_30m.ema_20 < snapshot_30m.ema_50 and snapshot_30m.ema_20_slope < 0:
+            elif snapshot_30m.ema_20_slope < 0 and snapshot_30m.ema_50_slope < 0:
                 meta.htf_trend_1h = "BEARISH"
                 meta.higher_timeframe_bias = "BEARISH"
             else:
