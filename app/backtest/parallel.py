@@ -146,6 +146,29 @@ def main() -> None:
         p.join()
 
     elapsed = time.time() - t0
+
+    # ─── Post-processing: fill htf_trend_1h from EMA slopes ─────────────
+    # The 30m warmup doesn't have enough history for EMA50, so htf_trend_1h
+    # stays empty during replay. Derive it from stored ema_20_slope/ema_50_slope.
+    print(f"\n─── Post-fill: Computing htf_trend_1h from EMA slopes ───")
+    try:
+        from app.db.research_store import ResearchStore
+        store = ResearchStore()
+        store.start()
+        store._query("""
+            UPDATE trades SET htf_trend_1h = CASE
+                WHEN ema_20_slope > 0 AND ema_50_slope > 0 THEN 'BULLISH'
+                WHEN ema_20_slope < 0 AND ema_50_slope < 0 THEN 'BEARISH'
+                ELSE 'NEUTRAL'
+            END
+            WHERE htf_trend_1h = '' OR htf_trend_1h IS NULL
+        """, ())
+        store.stop()
+        print("  ✅ htf_trend_1h filled")
+    except Exception as e:
+        print(f"  ⚠️ htf_trend_1h post-fill failed: {e}")
+        print("  Run manually: UPDATE trades SET htf_trend_1h = CASE WHEN ema_20_slope > 0 AND ema_50_slope > 0 THEN 'BULLISH' WHEN ema_20_slope < 0 AND ema_50_slope < 0 THEN 'BEARISH' ELSE 'NEUTRAL' END WHERE htf_trend_1h = '';")
+
     print(f"\n{'═' * 70}")
     print(f"  ALL WORKERS COMPLETE in {elapsed:.0f}s ({elapsed/3600:.1f} hours)")
     print(f"{'═' * 70}")
