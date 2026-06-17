@@ -1,0 +1,16 @@
+[Unit]
+Description=Paper Trading Bot — 10 Regime-Scored Variants
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/algo-strategy
+ExecStart=/home/ubuntu/algo-strategy/venv/bin/python -m app.main_paper
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
