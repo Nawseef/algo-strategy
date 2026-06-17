@@ -65,11 +65,9 @@ class ExitSimulationEngine:
         """
         Run exit simulation for all trades on a given date.
 
-        Args:
-            date_str: Date in "YYYY-MM-DD" format.
-
-        Returns:
-            ExitEngineStats with processing summary.
+        Optimized: pre-loads ALL candles for the day into memory (one query per
+        instrument+timeframe) to eliminate per-trade DB queries. Previously this
+        method issued 2 DB queries per trade (20K+ queries/day), now it's ~20 total.
         """
         t0 = time.time()
         stats = ExitEngineStats()
@@ -82,8 +80,37 @@ class ExitSimulationEngine:
 
         logger.info("Exit simulation: processing %d trades for %s", len(trades), date_str)
 
+        # ─── Pre-load ALL candles for the day into memory ────────────────
+        # Key: (instrument, timeframe) → list of candle dicts sorted by timestamp_ms
+        from datetime import datetime as _dt
+        day_start_ms = _dt.strptime(date_str, "%Y-%m-%d").replace(
+            hour=9, minute=0
+        ).timestamp() * 1000
+        day_end_ms = _dt.strptime(date_str, "%Y-%m-%d").replace(
+            hour=15, minute=35
+        ).timestamp() * 1000
+
+        # Collect unique instrument+timeframe combos needed
+        needed: set[tuple[str, str]] = set()
         for trade in trades:
-            success = self._process_trade(trade)
+            inst = trade["instrument"]
+            tf = trade.get("timeframe", "5m")
+            needed.add((inst, tf))
+            needed.add((inst, "5m"))  # fallback
+
+        # Batch load: one query per combo (replaces 20K+ per-trade queries)
+        day_candles: dict[tuple[str, str], list[dict]] = {}
+        for instrument, timeframe in needed:
+            key = (instrument, timeframe)
+            if key not in day_candles:
+                rows = self._store.get_cached_candles(
+                    instrument, timeframe, day_start_ms, day_end_ms
+                )
+                day_candles[key] = rows if rows else []
+
+        # Process trades using pre-loaded candle data
+        for trade in trades:
+            success = self._process_trade(trade, day_candles)
             if success:
                 stats.trades_processed += 1
             else:
@@ -101,9 +128,9 @@ class ExitSimulationEngine:
 
         return stats
 
-    def _process_trade(self, trade: dict) -> bool:
+    def _process_trade(self, trade: dict, day_candles: dict[tuple[str, str], list[dict]]) -> bool:
         """
-        Process a single trade: load candle path, run exits, write results.
+        Process a single trade using pre-loaded candle data (no DB queries).
         Returns True if successful, False if skipped.
         """
         trade_id = trade["trade_id"]
@@ -114,27 +141,24 @@ class ExitSimulationEngine:
         direction = trade["direction"]
         atr_at_entry = trade.get("atr_entry", 0.0)
 
-        # Load candle path: entry_time → market close (~15:30 IST)
-        # Market close: add ~6.25 hours (22500 seconds) from 9:15 as rough upper bound
-        # More precisely: get all candles from entry to end of day
         from datetime import datetime
         entry_dt = datetime.fromtimestamp(entry_time_ms / 1000)
-        eod_dt = entry_dt.replace(hour=15, minute=30, second=0, microsecond=0)
-        end_ms = eod_dt.timestamp() * 1000
+        eod_ms = entry_dt.replace(hour=15, minute=30, second=0, microsecond=0).timestamp() * 1000
 
-        candle_path_raw = self._store.get_cached_candles(
-            instrument, timeframe, entry_time_ms, end_ms
-        )
+        # Get candle path from pre-loaded data (memory lookup, no DB query)
+        candles_all = day_candles.get((instrument, timeframe))
+        if not candles_all:
+            candles_all = day_candles.get((instrument, "5m"))
+        if not candles_all:
+            return False
+
+        # Slice: entry_time → end of day
+        candle_path_raw = [
+            c for c in candles_all
+            if c["timestamp_ms"] >= entry_time_ms and c["timestamp_ms"] <= eod_ms
+        ]
 
         if not candle_path_raw:
-            # Try with just the instrument (timeframe might not match exactly)
-            # Also try 5m as default if timeframe doesn't yield results
-            candle_path_raw = self._store.get_cached_candles(
-                instrument, "5m", entry_time_ms, end_ms
-            )
-
-        if not candle_path_raw:
-            logger.debug("No candle path for trade %s (%s %s)", trade_id, instrument, timeframe)
             return False
 
         # ─── Skip entry candle for CANDLE_CLOSE trades ───────────────────
@@ -172,16 +196,13 @@ class ExitSimulationEngine:
         if not candle_path:
             return False
 
-        # Also get candles BEFORE entry for swing stop calculation
-        pre_entry_raw = self._store.get_cached_candles(
-            instrument, timeframe,
-            entry_time_ms - (5 * 300_000),  # ~5 candles before (5m)
-            entry_time_ms,
-        )
+        # Also get candles BEFORE entry for swing stop calculation (from memory)
         candles_before_entry = [
             {"open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"]}
-            for c in pre_entry_raw
-        ] if pre_entry_raw else None
+            for c in candles_all
+            if c["timestamp_ms"] >= entry_time_ms - (5 * 300_000)
+            and c["timestamp_ms"] < entry_time_ms
+        ] or None
 
         # ─── Run all exit models ─────────────────────────────────────────
         results: dict[str, float] = {}
@@ -285,3 +306,101 @@ class ExitSimulationEngine:
             mae = entry_price - worst_price  # negative = bad
 
         return mfe, mae
+
+
+# ─── Module-level worker for multiprocessing ─────────────────────────────────
+
+def _process_trade_worker(
+    trade: dict, day_candles: dict[tuple[str, str], list[dict]]
+) -> dict | None:
+    """
+    Process a single trade's exit simulation (stateless, no DB access).
+    Returns the results dict or None if skipped.
+    Used by multiprocessing Pool.
+    """
+    from datetime import datetime
+
+    instrument = trade["instrument"]
+    timeframe = trade["timeframe"]
+    entry_time_ms = trade["entry_time_ms"]
+    entry_price = trade["entry_price"]
+    direction = trade["direction"]
+    atr_at_entry = trade.get("atr_entry", 0.0)
+
+    entry_dt = datetime.fromtimestamp(entry_time_ms / 1000)
+    eod_ms = entry_dt.replace(hour=15, minute=30, second=0, microsecond=0).timestamp() * 1000
+
+    # Get candles from pre-loaded data
+    candles_all = day_candles.get((instrument, timeframe))
+    if not candles_all:
+        candles_all = day_candles.get((instrument, "5m"))
+    if not candles_all:
+        return None
+
+    # Slice: entry_time → end of day
+    candle_path_raw = [
+        c for c in candles_all
+        if c["timestamp_ms"] >= entry_time_ms and c["timestamp_ms"] <= eod_ms
+    ]
+
+    if not candle_path_raw:
+        return None
+
+    # Skip entry candle for CANDLE_CLOSE trades
+    if candle_path_raw[0].get("timestamp_ms") == entry_time_ms:
+        first_close = candle_path_raw[0].get("close", 0)
+        if abs(first_close - entry_price) < 0.01:
+            candle_path_raw = candle_path_raw[1:]
+
+    if not candle_path_raw:
+        return None
+
+    candle_path = [
+        {"open": c["open"], "high": c["high"], "low": c["low"],
+         "close": c["close"], "volume": c.get("volume", 0)}
+        for c in candle_path_raw
+    ]
+
+    # Pre-entry candles for swing stop
+    candles_before_entry = [
+        {"open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"]}
+        for c in candles_all
+        if c["timestamp_ms"] >= entry_time_ms - (5 * 300_000)
+        and c["timestamp_ms"] < entry_time_ms
+    ] or None
+
+    # Run all exit models
+    results: dict[str, float] = {}
+
+    results.update(simulate_all_rr(entry_price, direction, atr_at_entry, candle_path))
+    results.update(simulate_all_stops(entry_price, direction, atr_at_entry, candle_path, candles_before_entry))
+    results.update(simulate_all_trails(entry_price, direction, atr_at_entry, candle_path))
+    results.update(simulate_all_partials(entry_price, direction, atr_at_entry, candle_path))
+    results.update(simulate_all_time_exits(entry_price, direction, candle_path))
+
+    # Session exits
+    market_open = entry_dt.replace(hour=9, minute=15, second=0, microsecond=0)
+    entry_candle_from_open = int((entry_dt - market_open).total_seconds() / 300) if entry_dt > market_open else 0
+    results.update(simulate_all_session_exits(entry_price, direction, candle_path, entry_candle_from_open))
+
+    results.update(simulate_all_dead_trade_exits(entry_price, direction, candle_path))
+    results.update(simulate_all_breakeven_trails(entry_price, direction, atr_at_entry, candle_path))
+    results.update(simulate_all_chandelier_exits(entry_price, direction, atr_at_entry, candle_path))
+    results.update(simulate_all_indicator_exits(entry_price, direction, atr_at_entry, candle_path))
+
+    # MFE/MAE
+    mfe, mae = ExitSimulationEngine._compute_excursions(entry_price, direction, candle_path)
+    results["mfe"] = mfe
+    results["mae"] = mae
+
+    # Best/worst
+    all_pnls = {k: v for k, v in results.items() if k not in ("mfe", "mae")}
+    if all_pnls:
+        best_model = max(all_pnls, key=all_pnls.get)
+        worst_model = min(all_pnls, key=all_pnls.get)
+        results["best_exit_model"] = best_model
+        results["best_pnl"] = all_pnls[best_model]
+        results["worst_exit_model"] = worst_model
+        results["worst_pnl"] = all_pnls[worst_model]
+
+    return results
