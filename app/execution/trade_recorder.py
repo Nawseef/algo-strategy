@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import time
 import threading
-import uuid
 
 from app.db.research_store import ResearchStore
 from app.utils.logger import get_logger
@@ -62,6 +61,13 @@ class TradeRecorder:
 
         self._running = False
         self._flush_timer: threading.Timer | None = None
+
+    @staticmethod
+    def _make_trade_id(variant_id: str, instrument: str, entry_time_ms: float, direction: str) -> str:
+        """Generate deterministic trade_id from signal data. Same signal = same ID."""
+        import hashlib
+        raw = f"{variant_id}|{instrument}|{int(entry_time_ms)}|{direction}"
+        return f"T-{hashlib.md5(raw.encode()).hexdigest()[:12]}"
 
     def start(self) -> None:
         """Start the flush timer."""
@@ -121,7 +127,7 @@ class TradeRecorder:
         recorded = 0
         for variant, candidate in variants_and_signals:
             trade = TradeRecord(
-                trade_id=f"T-{uuid.uuid4().hex[:12]}",
+                trade_id=self._make_trade_id(variant.variant_id, instrument, timestamp_ms, candidate.direction.value),
                 variant_id=variant.variant_id,
                 strategy=variant.strategy.value,
                 timeframe=variant.timeframe.value,
