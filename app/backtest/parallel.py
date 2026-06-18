@@ -6,8 +6,8 @@ as an independent process. Each worker has its own replay engine,
 writes to the same DB (trade_ids are UUIDs, no conflicts).
 
 Usage:
-    python -m app.backtest.parallel --from 2021-01-01 --to 2026-06-12 --workers 4
-    python -m app.backtest.parallel --from 2021-01-01 --to 2026-06-12 --workers 4 --skip-fetch
+    python -m app.backtest.parallel --from 2021-01-01 --to 2026-06-12 --workers 2
+    python -m app.backtest.parallel --from 2021-01-01 --to 2026-06-12 --workers 2 --skip-fetch
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def main() -> None:
     args = sys.argv[1:]
     start_date = date(2021, 1, 1)
     end_date = date.today()
-    num_workers = 4
+    num_workers = 2
     instruments: list[str] | None = None
     skip_fetch = False
 
