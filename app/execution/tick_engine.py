@@ -67,13 +67,6 @@ class TickTriggerEngine:
         # Trade queue — flushed periodically, NOT written per tick
         self._trade_queue: list[TradeRecord] = []
 
-    @staticmethod
-    def _make_trade_id(variant_id: str, instrument: str, entry_time_ms: float, direction: str) -> str:
-        """Generate deterministic trade_id from signal data. Same signal = same ID."""
-        import hashlib
-        raw = f"{variant_id}|{instrument}|{int(entry_time_ms)}|{direction}"
-        return f"T-{hashlib.md5(raw.encode()).hexdigest()[:12]}"
-
         # Current indicator/metadata snapshots per instrument (set by orchestrator)
         self._snapshots: dict[str, IndicatorSnapshot] = {}
         self._metadata: dict[str, MetadataSnapshot] = {}
@@ -82,6 +75,13 @@ class TickTriggerEngine:
         self._ticks_processed: int = 0
         self._groups_triggered: int = 0
         self._trades_created: int = 0
+
+    @staticmethod
+    def _make_trade_id(variant_id: str, instrument: str, entry_time_ms: float, direction: str) -> str:
+        """Generate deterministic trade_id from signal data. Same signal = same ID."""
+        import hashlib
+        raw = f"{variant_id}|{instrument}|{int(entry_time_ms)}|{direction}"
+        return f"T-{hashlib.md5(raw.encode()).hexdigest()[:12]}"
 
     def on_tick(self, tick: Tick) -> int:
         """
