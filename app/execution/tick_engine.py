@@ -24,7 +24,6 @@ flushes them periodically (every N seconds or on buffer full).
 from __future__ import annotations
 
 import time
-import uuid
 from collections import defaultdict
 
 from app.broker.base import Tick
@@ -67,6 +66,13 @@ class TickTriggerEngine:
 
         # Trade queue — flushed periodically, NOT written per tick
         self._trade_queue: list[TradeRecord] = []
+
+    @staticmethod
+    def _make_trade_id(variant_id: str, instrument: str, entry_time_ms: float, direction: str) -> str:
+        """Generate deterministic trade_id from signal data. Same signal = same ID."""
+        import hashlib
+        raw = f"{variant_id}|{instrument}|{int(entry_time_ms)}|{direction}"
+        return f"T-{hashlib.md5(raw.encode()).hexdigest()[:12]}"
 
         # Current indicator/metadata snapshots per instrument (set by orchestrator)
         self._snapshots: dict[str, IndicatorSnapshot] = {}
@@ -170,7 +176,7 @@ class TickTriggerEngine:
         variant = armed_variant.variant
 
         return TradeRecord(
-            trade_id=f"T-{uuid.uuid4().hex[:12]}",
+            trade_id=self._make_trade_id(variant.variant_id, instrument, timestamp_ms, armed_variant.direction.value),
             variant_id=variant.variant_id,
             strategy=variant.strategy.value,
             timeframe=variant.timeframe.value,
