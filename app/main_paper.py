@@ -65,9 +65,10 @@ VARIANT_CAPITAL = 500_000.0  # ₹5L
 
 # Instruments to trade (exchange_token → name, lot_size)
 # 6 instruments validated after futures costs via regime scoring
+# NOTE: Indices use string names (NIFTY/BANKNIFTY) as that's what Groww feed returns
 INSTRUMENTS = {
-    "26009": {"name": "BANKNIFTY", "lot_size": 15, "type": "index_fut"},
-    "26000": {"name": "NIFTY", "lot_size": 25, "type": "index_fut"},
+    "BANKNIFTY": {"name": "BANKNIFTY", "lot_size": 15, "type": "index_fut"},
+    "NIFTY": {"name": "NIFTY", "lot_size": 25, "type": "index_fut"},
     "11536": {"name": "TCS", "lot_size": 175, "type": "stock_fut"},
     "2885": {"name": "RELIANCE", "lot_size": 250, "type": "stock_fut"},
     "10604": {"name": "BHARTIARTL", "lot_size": 457, "type": "stock_fut"},
@@ -75,19 +76,19 @@ INSTRUMENTS = {
 }
 
 # VIX token (for regime detection only, not traded)
-VIX_TOKEN = "26017"
+VIX_TOKEN = "INDIAVIX"
 
 # All tokens to subscribe (tradeable + VIX)
 ALL_TOKENS = list(INSTRUMENTS.keys()) + [VIX_TOKEN]
 
 # Futures costs (in points) for PnL calculation
 FUTURES_COSTS = {
-    "26009": 28,   # BANKNIFTY
-    "26000": 17,   # NIFTY
-    "11536": 5,    # TCS
-    "2885": 5,     # RELIANCE
-    "10604": 5,    # BHARTIARTL
-    "1594": 5,     # INFY
+    "BANKNIFTY": 28,   # BANKNIFTY
+    "NIFTY": 17,       # NIFTY
+    "11536": 5,        # TCS
+    "2885": 5,         # RELIANCE
+    "10604": 5,        # BHARTIARTL
+    "1594": 5,         # INFY
 }
 
 # No disaster SL — MR trades go against you before reversing (verified in backtest)
@@ -160,7 +161,7 @@ class VariantConfig:
 ALLOWED_REGIMES: dict[str, list[tuple[str, str, str]]] = {
     # BNF: Validated in NORMAL TRENDING/TRANSITIONING MORNING (E=250-316 pts)
     # MIDDAY: BNF profitable in validation (NORMAL TRENDING +55, TRANS +26, LOW TREND +76)
-    "26009": [
+    "BANKNIFTY": [
         ("MORNING", "HIGH",   "TRENDING"),
         ("MORNING", "HIGH",   "TRANSITIONING"),
         ("MORNING", "NORMAL", "TRENDING"),
@@ -175,7 +176,7 @@ ALLOWED_REGIMES: dict[str, list[tuple[str, str, str]]] = {
     # NF: Validated in HIGH TRANSITIONING (E=88), NORMAL TRENDING (E=188),
     #     NORMAL TRANSITIONING (E=125)
     # MIDDAY: NF validation mixed, but NORMAL TRANS +41 WR=80% and LOW TRENDING +51 WR=67%
-    "26000": [
+    "NIFTY": [
         ("MORNING", "HIGH",   "TRENDING"),
         ("MORNING", "HIGH",   "TRANSITIONING"),
         ("MORNING", "NORMAL", "TRENDING"),
@@ -234,8 +235,8 @@ ALLOWED_REGIMES: dict[str, list[tuple[str, str, str]]] = {
 # Per-instrument BEST exit models (from validation period 2025+ analysis)
 # Used by Variant 2 to compare against Variant 1's uniform time_1h
 BEST_EXIT_PER_INSTRUMENT: dict[str, str] = {
-    "26009": "time_1h",          # BNF: time_1h is already best (238.7 avg)
-    "26000": "rr3",              # NF: rr3 slightly better (103.7 vs 100.9)
+    "BANKNIFTY": "time_1h",      # BNF: time_1h is already best (238.7 avg)
+    "NIFTY": "rr3",              # NF: rr3 slightly better (103.7 vs 100.9)
     "11536": "time_2h",          # TCS: time_2h slightly better (20.1 vs 19.7)
     "2885": "ema13_cross",       # RELIANCE: ema13_cross tied (9.7 vs 9.6)
     "10604": "session_morning",  # BHARTIARTL: session_morning slightly better (13.2 vs 12.8)
