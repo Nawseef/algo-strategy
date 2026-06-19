@@ -907,10 +907,20 @@ class SignalEvaluator:
         if ema20_val is None or atr_val is None or rsi_val is None:
             return None
 
-        # Get previous RSI (from last candle evaluation)
+        # Get previous RSI (from last candle's close)
+        # We track prev_rsi per (token, timeframe) and only update it once per new candle.
+        # This ensures all variants evaluating the same candle see the same prev_rsi.
         key = (token, timeframe.value)
-        prev_rsi_val = self._prev_rsi.get(key)
-        self._prev_rsi[key] = rsi_val
+        candle_ts_key = f"{token}|{timeframe.value}|ts"
+        current_candle_ts = candles[-1].timestamp_ms
+
+        if self._prev_rsi.get(candle_ts_key) != current_candle_ts:
+            # New candle — rotate: current becomes prev, store new current
+            self._prev_rsi[f"{token}|{timeframe.value}|prev"] = self._prev_rsi.get(key)
+            self._prev_rsi[key] = rsi_val
+            self._prev_rsi[candle_ts_key] = current_candle_ts
+
+        prev_rsi_val = self._prev_rsi.get(f"{token}|{timeframe.value}|prev")
 
         if prev_rsi_val is None:
             return None
