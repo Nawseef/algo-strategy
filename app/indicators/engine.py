@@ -90,8 +90,11 @@ class IndicatorEngine:
 
         self._last_metadata_date: str = ""
 
-        # Track latest candle timestamp for backtest-safe metadata
-        self._last_candle_timestamp_ms: float = 0.0
+        # Track latest candle timestamp PER INSTRUMENT (not shared scalar)
+        # Shared scalar caused cross-instrument session contamination: processing
+        # instrument B's 9:30 candle would overwrite the timestamp used when
+        # get_metadata(A) is called, making A's session reflect B's time.
+        self._last_candle_timestamp_ms: dict[str, float] = {}
 
     # ─── Public API ──────────────────────────────────────────────────────────
 
@@ -194,8 +197,8 @@ class IndicatorEngine:
         # Store snapshot
         self._snapshots[key] = snapshot
 
-        # Track latest candle timestamp for metadata derivation
-        self._last_candle_timestamp_ms = candle.timestamp_ms
+        # Track latest candle timestamp per instrument for metadata derivation
+        self._last_candle_timestamp_ms[token] = candle.timestamp_ms
 
         return snapshot
 
@@ -269,9 +272,12 @@ class IndicatorEngine:
 
     def _maybe_update_metadata(self, exchange_token: str) -> None:
         """Update metadata snapshot (session, gap, etc.)."""
-        # Derive date/time from last processed candle (backtest-safe)
-        if self._last_candle_timestamp_ms > 0:
-            candle_dt = datetime.fromtimestamp(self._last_candle_timestamp_ms / 1000)
+        # Derive date/time from last processed candle for THIS instrument (backtest-safe)
+        # Using per-instrument timestamp prevents cross-instrument contamination where
+        # processing instrument B's later candle corrupts instrument A's session tag.
+        ts = self._last_candle_timestamp_ms.get(exchange_token, 0.0)
+        if ts > 0:
+            candle_dt = datetime.fromtimestamp(ts / 1000)
             today = candle_dt.strftime("%Y-%m-%d")
             now = candle_dt.time()
             day_of_week = candle_dt.strftime("%a").upper()[:3]

@@ -293,7 +293,15 @@ class DataManager:
     async def _execute_fetches(
         self, requests: list[WarmupRequest]
     ) -> list[tuple[WarmupRequest, list[Candle] | None]]:
-        """Execute all fetch requests with concurrency control."""
+        """
+        Execute all fetch requests in sequential batches to avoid rate limits.
+
+        Groww's new API rate-limits aggressively when both research and paper
+        fire concurrent requests at 09:00. We process requests one at a time
+        (concurrency=1 effective) with a configurable inter-request delay.
+        The semaphore still limits burst concurrency if self._concurrency > 1
+        is ever configured deliberately.
+        """
         semaphore = asyncio.Semaphore(self._concurrency)
         results: list[tuple[WarmupRequest, list[Candle] | None]] = []
 
@@ -302,22 +310,25 @@ class DataManager:
         ) -> tuple[WarmupRequest, list[Candle] | None]:
             async with semaphore:
                 candles = await self._fetch_with_retry(req)
+                # Delay AFTER each request (inside semaphore) so concurrent
+                # slots don't all fire at once when released
                 await asyncio.sleep(self._delay_ms / 1000.0)
                 return (req, candles)
 
-        tasks = [fetch_one(req) for req in requests]
-        completed = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for i, item in enumerate(completed):
-            if isinstance(item, Exception):
+        # Process sequentially: one task at a time, not gather()
+        # This ensures we never burst more than concurrency requests simultaneously
+        # and the delay between each is respected strictly
+        for i, req in enumerate(requests):
+            try:
+                item = await fetch_one(req)
+                results.append(item)
+            except Exception as exc:
                 logger.error(
                     "Warmup fetch exception for %s: %s",
-                    requests[i].trading_symbol,
-                    item,
+                    req.trading_symbol,
+                    exc,
                 )
-                results.append((requests[i], None))
-            else:
-                results.append(item)
+                results.append((req, None))
 
         return results
 
@@ -427,9 +438,18 @@ class DataManager:
                 req.trading_symbol,
                 req.timeframe.value,
             )
-            return []
+            # Return [] here — _fetch_candles will treat this as an empty result.
+            # We raise so caller falls back to old API instead of silently returning 0 candles.
+            raise ValueError(f"New API returned empty candles for {req.trading_symbol}/{req.timeframe.value}")
 
         candles = self._parse_candles_new_api(raw_candles, req)
+
+        # If ALL candles had null OHLCV (parse returned nothing), force fallback too
+        if not candles:
+            raise ValueError(
+                f"New API returned {len(raw_candles)} candles but all had null OHLCV "
+                f"for {req.trading_symbol}/{req.timeframe.value}"
+            )
 
         if len(candles) > req.candles_needed:
             candles = candles[-req.candles_needed:]
@@ -534,8 +554,14 @@ class DataManager:
         New API response format per candle:
         ["2025-09-24T10:30:00", open, high, low, close, volume, open_interest]
         Timestamp is an ISO string, not epoch seconds.
+
+        Groww occasionally returns None for OHLCV fields on some symbols
+        (especially at the edges of the requested range). We skip those candles
+        rather than crashing with float(None) which previously caused the new API
+        to fail and fall back to the old API for every request.
         """
         candles = []
+        skipped = 0
 
         for raw in raw_candles:
             if len(raw) < 6:
@@ -549,6 +575,18 @@ class DataManager:
                 dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
                 timestamp_ms = dt.timestamp() * 1000
             except (ValueError, TypeError):
+                skipped += 1
+                continue
+
+            # Guard against None OHLCV values — Groww returns nulls on some candles
+            try:
+                o = float(raw[1])
+                h = float(raw[2])
+                l = float(raw[3])
+                c = float(raw[4])
+            except (TypeError, ValueError):
+                # One or more OHLCV fields is None/non-numeric — skip this candle
+                skipped += 1
                 continue
 
             candle = Candle(
@@ -557,13 +595,21 @@ class DataManager:
                 exchange_token=req.exchange_token,
                 timeframe=req.timeframe,
                 timestamp_ms=timestamp_ms,
-                open=float(raw[1]),
-                high=float(raw[2]),
-                low=float(raw[3]),
-                close=float(raw[4]),
+                open=o,
+                high=h,
+                low=l,
+                close=c,
                 volume=int(raw[5]) if raw[5] is not None else 0,
             )
             candles.append(candle)
+
+        if skipped:
+            logger.debug(
+                "New API: skipped %d candles with null OHLCV for %s/%s",
+                skipped,
+                req.trading_symbol,
+                req.timeframe.value,
+            )
 
         return candles
 

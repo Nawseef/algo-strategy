@@ -282,8 +282,12 @@ class VariantRanker:
         composite = self._composite_score(metrics, stability.stability_score)
 
         # Compute after-cost metrics
+        # Use token directly for cost lookup to handle numeric tokens (e.g. "26000")
+        # before falling back to name-based lookup which only works for string names
+        from app.scoring.costs import COST_FUTURES
+        from app.scoring.regime_scorer import FUTURES_COST_POINTS as _FCP
         instrument = trades[0].get("instrument", "NIFTY")
-        cost_per_trade = self._cost_model.cost_per_trade_points(instrument)
+        cost_per_trade = _FCP.get(instrument, self._cost_model.cost_per_trade_points(instrument))
         adjusted_pnls = self._cost_model.apply(pnl_values, instrument)
         net_metrics = compute_metrics(adjusted_pnls)
 

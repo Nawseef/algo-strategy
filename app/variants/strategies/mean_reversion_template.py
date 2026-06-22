@@ -51,8 +51,12 @@ class MeanReversionTemplate(BaseStrategyTemplate):
     """
 
     def __init__(self) -> None:
-        # Track previous RSI for crossover detection
-        self._prev_rsi: dict[str, float] = {}
+        # Track previous RSI per (token, timeframe) for crossover detection.
+        # MUST include timeframe in the key — research evaluates 5m/15m/30m candles
+        # for the same token in rapid succession. Without timeframe in the key,
+        # a 5m candle evaluation overwrites _prev_rsi for a token and the subsequent
+        # 15m evaluation uses the wrong prev_rsi, silently missing crossovers.
+        self._prev_rsi: dict[tuple[str, str], float] = {}
         self._last_reset_date: str = ""
 
     @property
@@ -85,8 +89,11 @@ class MeanReversionTemplate(BaseStrategyTemplate):
             return []
 
         rsi_val = snapshot.rsi
-        prev_rsi = self._prev_rsi.get(token)
-        self._prev_rsi[token] = rsi_val
+        # Key by (token, timeframe) — prevents 5m candle stomping 15m prev_rsi
+        # for the same instrument when candles of different timeframes close close together
+        rsi_key = (token, timeframe.value)
+        prev_rsi = self._prev_rsi.get(rsi_key)
+        self._prev_rsi[rsi_key] = rsi_val
 
         if prev_rsi is None or rsi_val == 0:
             return []

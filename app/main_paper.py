@@ -1652,7 +1652,7 @@ def main() -> None:
         # Create a minimal "strategy" stub to tell DataManager what we need
         class _WarmupStub:
             name = "paper_variants"
-            warmup_config = {"5m": 60, "15m": 60}  # 60 candles each = ~5h of 5m, ~15h of 15m
+            warmup_config = {"5m": 50, "15m": 50}  # 50 candles — matches research engine exactly
 
         data_manager = DataManager(
             broker=broker,
