@@ -38,9 +38,10 @@ class TrendTemplate(BaseStrategyTemplate):
     """
 
     def __init__(self) -> None:
-        # Track whether we're in a pullback zone per instrument
-        self._in_pullback: dict[str, bool] = {}
-        self._trend_direction: dict[str, str] = {}  # "BULL" / "BEAR" / ""
+        # Keyed by (token, timeframe.value) — prevents 5m evaluation stomping
+        # 15m state for the same instrument (same bug that existed in _prev_rsi).
+        self._in_pullback: dict[tuple[str, str], bool] = {}
+        self._trend_direction: dict[tuple[str, str], str] = {}  # "BULL" / "BEAR" / ""
         self._last_reset_date: str = ""
 
     @property
@@ -86,27 +87,25 @@ class TrendTemplate(BaseStrategyTemplate):
         is_bearish = ema9 < ema21 and snapshot.ema_20_slope < 0
 
         if not is_bullish and not is_bearish:
-            self._trend_direction[token] = ""
-            self._in_pullback[token] = False
+            self._trend_direction[(token, timeframe.value)] = ""
+            self._in_pullback[(token, timeframe.value)] = False
             return []
 
         candidates: list[CandidateSignal] = []
 
         if is_bullish:
             # ─── Bullish Trend Pullback ──────────────────────────────────
-            # Price has pulled back toward EMA21 (within 0.3% or touching)
-            pullback_zone = ema21 * 1.003  # Within 0.3% above EMA21
+            pullback_zone = ema21 * 1.003
             price_near_ema = candle.low <= pullback_zone
 
-            was_in_pullback = self._in_pullback.get(token, False)
+            tf_key = (token, timeframe.value)
+            was_in_pullback = self._in_pullback.get(tf_key, False)
 
             if price_near_ema and not was_in_pullback:
-                # Just entered pullback zone — arm for bounce
-                self._in_pullback[token] = True
-                self._trend_direction[token] = "BULL"
+                self._in_pullback[tf_key] = True
+                self._trend_direction[tf_key] = "BULL"
 
-                # Entry target: slightly above EMA21 (bounce confirmation)
-                entry_level = ema21 * 1.001  # Just above EMA21
+                entry_level = ema21 * 1.001
 
                 candidates.append(
                     CandidateSignal(
@@ -124,20 +123,21 @@ class TrendTemplate(BaseStrategyTemplate):
                     )
                 )
             elif not price_near_ema:
-                self._in_pullback[token] = False
+                self._in_pullback[tf_key] = False
 
         elif is_bearish:
             # ─── Bearish Trend Pullback ──────────────────────────────────
-            pullback_zone = ema21 * 0.997  # Within 0.3% below EMA21
+            pullback_zone = ema21 * 0.997
             price_near_ema = candle.high >= pullback_zone
 
-            was_in_pullback = self._in_pullback.get(token, False)
+            tf_key = (token, timeframe.value)
+            was_in_pullback = self._in_pullback.get(tf_key, False)
 
             if price_near_ema and not was_in_pullback:
-                self._in_pullback[token] = True
-                self._trend_direction[token] = "BEAR"
+                self._in_pullback[tf_key] = True
+                self._trend_direction[tf_key] = "BEAR"
 
-                entry_level = ema21 * 0.999  # Just below EMA21
+                entry_level = ema21 * 0.999
 
                 candidates.append(
                     CandidateSignal(
@@ -155,7 +155,7 @@ class TrendTemplate(BaseStrategyTemplate):
                     )
                 )
             elif not price_near_ema:
-                self._in_pullback[token] = False
+                self._in_pullback[tf_key] = False
 
         return candidates
 

@@ -40,12 +40,17 @@ class ORBTemplate(BaseStrategyTemplate):
     """
 
     def __init__(self) -> None:
-        # Per-instrument daily state
+        # Per-instrument daily state.
+        # range_high/low/ready are token-only because the ORB range itself is the
+        # same price levels regardless of timeframe — correct to share.
+        # _long_fired/_short_fired MUST be keyed by (token, timeframe.value) because
+        # a 5m ORB firing sets True and then the 15m ORB for the same instrument
+        # never generates a candidate. Each timeframe should arm independently.
         self._range_high: dict[str, float] = {}
         self._range_low: dict[str, float] = {}
         self._range_ready: dict[str, bool] = {}
-        self._long_fired: dict[str, bool] = {}  # Already generated long candidate today
-        self._short_fired: dict[str, bool] = {}
+        self._long_fired: dict[tuple[str, str], bool] = {}
+        self._short_fired: dict[tuple[str, str], bool] = {}
         self._last_reset_date: str = ""
 
     @property
@@ -109,8 +114,9 @@ class ORBTemplate(BaseStrategyTemplate):
         range_low = self._range_low[token]
 
         # Long candidate: if price hasn't already broken above
-        if not self._long_fired.get(token, False):
-            self._long_fired[token] = True
+        tf_key = (token, timeframe.value)
+        if not self._long_fired.get(tf_key, False):
+            self._long_fired[tf_key] = True
             candidates.append(
                 CandidateSignal(
                     direction=Direction.LONG,
@@ -127,8 +133,8 @@ class ORBTemplate(BaseStrategyTemplate):
             )
 
         # Short candidate
-        if not self._short_fired.get(token, False):
-            self._short_fired[token] = True
+        if not self._short_fired.get(tf_key, False):
+            self._short_fired[tf_key] = True
             candidates.append(
                 CandidateSignal(
                     direction=Direction.SHORT,

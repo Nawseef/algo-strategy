@@ -26,3 +26,4 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/*.sqlite
+data/paper_trades.json

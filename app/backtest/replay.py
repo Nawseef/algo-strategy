@@ -197,10 +197,21 @@ class BacktestReplayEngine:
         - Load 50 candles from PREVIOUS trading day(s) into candle_builder
         - This seeds the indicator engine so it produces valid snapshots
           from the very first candle of the current day (9:15)
-        - Then process ALL of today's candles through the evaluator
-        - ORB sees 9:15-9:30 candles, builds range, fires breakout after 9:30
+        - Then process ALL candles in true chronological order (5m/15m/30m interleaved)
+          matching live behavior where candles arrive in real time
+
+        Key fix: candles are merged into a single timeline sorted by timestamp
+        so that session/metadata/VIX are evaluated at the correct wall-clock time,
+        matching exactly what happens in live trading via the EventBus.
         """
         day_str = trading_day.strftime("%Y-%m-%d")
+
+        # ─── Reset template state for the new day (matches live reset_daily) ──
+        # Templates are singletons shared across all days. Without explicit reset,
+        # stale state from the last candle of the previous day leaks into today.
+        for template in self._templates.values():
+            if hasattr(template, '_maybe_reset_daily'):
+                template._maybe_reset_daily()
 
         # ─── Setup fresh pipeline for this day ───────────────────────────
         event_bus = EventBus()
@@ -220,20 +231,25 @@ class BacktestReplayEngine:
         # Per-timeframe candle counters
         candle_counters: dict[tuple[str, ResearchTimeframe], int] = defaultdict(int)
 
-        # ─── Load VIX for this day ───────────────────────────────────────
+        # ─── Time boundaries ─────────────────────────────────────────────
         day_start_ms = datetime.combine(trading_day, dtime(9, 15)).timestamp() * 1000
         day_end_ms = datetime.combine(trading_day, dtime(15, 30)).timestamp() * 1000
 
+        # ─── Load VIX candles for this day (used in interleaved timeline) ─
         vix_today = self._store.get_historical_candles(self._vix_token, "5m", day_start_ms, day_end_ms)
+        # Build a map: timestamp_ms → vix_value for fast lookup during timeline
+        vix_map: dict[float, float] = {}
         if vix_today:
-            vix_value = vix_today[0].get("close", 14.0)
-            indicator_engine.update_vix(vix_value)
+            # Seed initial VIX from first candle
+            indicator_engine.update_vix(vix_today[0].get("close", 14.0))
+            for vc in vix_today:
+                vix_map[vc["timestamp_ms"]] = vc.get("close", 14.0)
         else:
-            indicator_engine.update_vix(14.0)  # Default if no VIX data
+            indicator_engine.update_vix(14.0)
 
-        # ─── Load previous day's close for each instrument (for gap calc) ──
-        prev_day_end_ms = day_start_ms - 1  # just before today's open
-        prev_day_start_ms = prev_day_end_ms - (7 * 86400 * 1000)  # look back up to 7 days
+        # ─── Load previous day's close for each instrument ───────────────
+        prev_day_end_ms = day_start_ms - 1
+        prev_day_start_ms = prev_day_end_ms - (7 * 86400 * 1000)
         prev_closes: dict[str, float] = {}
         for token in self._instruments:
             if token == self._vix_token:
@@ -243,17 +259,21 @@ class BacktestReplayEngine:
                 prev_closes[token] = prev_candles[-1].get("close", 0.0)
 
         # ─── Load candles for each instrument ────────────────────────────
-        day_trades = 0
+        # Build unified timeline: (timestamp_ms, candle, rtf, core_tf, token)
+        # All timeframes for all instruments merged into chronological order.
+        timeline: list[tuple[float, Candle, ResearchTimeframe, Timeframe, str]] = []
+
+        # Also store 5m candles per token for synthetic tick generation
+        candles_5m_by_token: dict[str, list[Candle]] = {}
 
         for token in self._instruments:
             if token == self._vix_token:
-                continue  # VIX is not traded
+                continue
 
             candles_raw = self._store.get_historical_candles(token, "5m", day_start_ms, day_end_ms)
             if not candles_raw:
                 continue
 
-            # Convert to Candle objects
             candles_5m: list[Candle] = []
             for c in candles_raw:
                 candle = Candle(
@@ -266,19 +286,16 @@ class BacktestReplayEngine:
                 candles_5m.append(candle)
 
             if len(candles_5m) < 10:
-                continue  # Not enough candles (partial day?)
+                continue
 
             self._total_candles += len(candles_5m)
+            candles_5m_by_token[token] = candles_5m
 
-            # ─── Warmup from PREVIOUS day (matches live mode) ────────────
-            # Load last 50 candles from previous trading days as indicator warmup.
-            # This ensures indicator engine has enough history to produce valid
-            # snapshots from the very first candle of the current day.
+            # ─── Warmup from previous day ────────────────────────────────
             warmup_raw = self._store.get_historical_candles(
                 token, "5m", prev_day_start_ms, prev_day_end_ms
             )
             if warmup_raw:
-                # Take last 50 candles from previous days
                 warmup_raw = warmup_raw[-50:]
                 warmup_candles: list[Candle] = []
                 for c in warmup_raw:
@@ -290,104 +307,124 @@ class BacktestReplayEngine:
                         volume=c.get("volume", 0),
                     )
                     warmup_candles.append(wc)
+
+                # Inject 5m warmup history
                 candle_builder.inject_history(token, Timeframe.M5, warmup_candles)
 
-                # Also build 15m/30m warmup from previous day candles
+                # Build 15m/30m warmup from the same previous-day candles
                 warmup_15m = self._aggregate_candles(warmup_candles, 3, token, Timeframe.M15)
                 warmup_30m = self._aggregate_candles(warmup_candles, 6, token, Timeframe.M30)
                 if warmup_15m:
                     candle_builder.inject_history(token, Timeframe.M15, warmup_15m)
+                    # Run 15m warmup through on_candle to seed EMA slope tracking
+                    for wc15 in warmup_15m:
+                        indicator_engine.on_candle(wc15)
                 if warmup_30m:
                     candle_builder.inject_history(token, Timeframe.M30, warmup_30m)
-                    # Run 30m warmup candles through on_candle so indicator engine
-                    # computes M30 EMA snapshots needed for htf_trend_1h
                     for wc30 in warmup_30m:
                         indicator_engine.on_candle(wc30)
 
-            # ─── Process ALL candles from 9:15 onwards ───────────────────
+            # ─── Previous close + opening range setup ────────────────────
             prev_close = prev_closes.get(token, candles_5m[0].open)
             indicator_engine.set_prev_day_close(token, prev_close)
 
-            for i, candle in enumerate(candles_5m):
-                # Cache for exit engine
-                candle_cache.on_candle(candle)
+            # ─── Add 5m candles to timeline ──────────────────────────────
+            for candle in candles_5m:
+                timeline.append((candle.timestamp_ms, candle, ResearchTimeframe.M5, Timeframe.M5, token))
 
-                # Update opening range (9:15 - 9:30 = first 3 x 5m candles)
-                # Needed for gap_direction and opening_range_size in metadata
-                candle_dt = datetime.fromtimestamp(candle.timestamp_ms / 1000)
-                if dtime(9, 15) <= candle_dt.time() <= dtime(9, 30):
-                    indicator_engine.update_opening_range(token, candle)
+            # ─── Aggregate 15m/30m and add to timeline ───────────────────
+            candles_15m = self._aggregate_candles(candles_5m, 3, token, Timeframe.M15)
+            candles_30m = self._aggregate_candles(candles_5m, 6, token, Timeframe.M30)
+            for candle in candles_15m:
+                timeline.append((candle.timestamp_ms, candle, ResearchTimeframe.M15, Timeframe.M15, token))
+            for candle in candles_30m:
+                timeline.append((candle.timestamp_ms, candle, ResearchTimeframe.M30, Timeframe.M30, token))
 
-                # Inject candle into history for evaluator access
-                candle_builder.inject_history(token, Timeframe.M5, [candle])
+        # ─── Sort timeline by timestamp (interleaved, matches live behavior) ─
+        # When multiple candles share the same timestamp (a 15m and three 5m both
+        # close at 9:30), process 5m first then 15m then 30m — matches CandleBuilder
+        # emission order in live trading.
+        TF_ORDER = {Timeframe.M5: 0, Timeframe.M15: 1, Timeframe.M30: 2}
+        timeline.sort(key=lambda x: (x[0], TF_ORDER.get(x[3], 0)))
 
-                # Compute indicator snapshot (handles dedup internally)
-                snapshot = indicator_engine.on_candle(candle)
-                if snapshot is None:
-                    # Not enough history for indicators yet (first day of backtest
-                    # with no previous data). Still call evaluator so ORB can build
-                    # its opening range. Filters will block everything since
-                    # indicators are all 0, but ORB template only needs OHLC.
+        # ─── Process unified timeline ─────────────────────────────────────
+        # Track 5m candle index per token for synthetic tick generation
+        candle_5m_index: dict[str, int] = {t: 0 for t in candles_5m_by_token}
+
+        for ts_ms, candle, rtf, core_tf, token in timeline:
+            # Update VIX if we've crossed into this candle's timestamp
+            # This replicates live tick-by-tick VIX updates at the right time
+            if vix_map and ts_ms in vix_map:
+                indicator_engine.update_vix(vix_map[ts_ms])
+
+            # Opening range tracking (9:15–9:30 for metadata)
+            candle_dt = datetime.fromtimestamp(ts_ms / 1000)
+            if core_tf == Timeframe.M5 and dtime(9, 15) <= candle_dt.time() <= dtime(9, 30):
+                indicator_engine.update_opening_range(token, candle)
+
+            # Cache for exit engine
+            candle_cache.on_candle(candle)
+
+            # Inject into history
+            candle_builder.inject_history(token, core_tf, [candle])
+
+            # Compute indicator snapshot
+            snapshot = indicator_engine.on_candle(candle)
+            if snapshot is None:
+                if core_tf == Timeframe.M5:
                     metadata = indicator_engine.get_metadata(token)
-                    history = candle_builder.get_history(token, Timeframe.M5)
+                    history = candle_builder.get_history(token, core_tf)
                     minimal_snapshot = IndicatorSnapshot()
-                    for rtf in [ResearchTimeframe.M5]:
-                        counter_key = (token, rtf)
-                        candle_counters[counter_key] += 1
-                        current_candle_idx = candle_counters[counter_key]
-                        armed_state.cleanup_expired(token, current_candle_idx, timeframe=rtf.value)
-                        evaluator.evaluate(
-                            instrument=token, timeframe=rtf,
-                            candle=candle, history=history,
-                            snapshot=minimal_snapshot, metadata=metadata,
-                            candle_index=current_candle_idx,
-                        )
-                    continue
-
-                # Get metadata
-                metadata = indicator_engine.get_metadata(token)
-
-                # Update tick engine snapshots
-                tick_engine.update_snapshot(token, snapshot)
-                tick_engine.update_metadata(token, metadata)
-
-                # Process for each research timeframe that this candle closes
-                for rtf in [ResearchTimeframe.M5]:
-                    # Increment counter
                     counter_key = (token, rtf)
                     candle_counters[counter_key] += 1
                     current_candle_idx = candle_counters[counter_key]
-
-                    # Cleanup expired
                     armed_state.cleanup_expired(token, current_candle_idx, timeframe=rtf.value)
-
-                    # Evaluate
-                    history = candle_builder.get_history(token, Timeframe.M5)
-                    result = evaluator.evaluate(
+                    evaluator.evaluate(
                         instrument=token, timeframe=rtf,
                         candle=candle, history=history,
-                        snapshot=snapshot, metadata=metadata,
+                        snapshot=minimal_snapshot, metadata=metadata,
                         candle_index=current_candle_idx,
                     )
+                continue
 
-                    # Record immediate trades
-                    if result.immediate_trades:
-                        trade_recorder.record_immediate_trades(
-                            result.immediate_trades, token,
-                            candle.timestamp_ms, snapshot, metadata,
-                        )
+            metadata = indicator_engine.get_metadata(token)
+            tick_engine.update_snapshot(token, snapshot)
+            tick_engine.update_metadata(token, metadata)
 
-                    # Arm new variants
-                    if result.armed_variants:
-                        armed_state.arm(result.armed_variants)
+            # Increment counter and evaluate
+            counter_key = (token, rtf)
+            candle_counters[counter_key] += 1
+            current_candle_idx = candle_counters[counter_key]
 
-                    # Rebuild groups
-                    all_armed = armed_state.get_armed(token)
-                    grouping_engine.rebuild(token, all_armed)
+            armed_state.cleanup_expired(token, current_candle_idx, timeframe=rtf.value)
 
-                # Simulate intrabar ticks from NEXT candle (for INTRABAR triggers)
-                if i + 1 < len(candles_5m):
-                    next_candle = candles_5m[i + 1]
+            history = candle_builder.get_history(token, core_tf)
+            result = evaluator.evaluate(
+                instrument=token, timeframe=rtf,
+                candle=candle, history=history,
+                snapshot=snapshot, metadata=metadata,
+                candle_index=current_candle_idx,
+            )
+
+            if result.immediate_trades:
+                trade_recorder.record_immediate_trades(
+                    result.immediate_trades, token,
+                    candle.timestamp_ms, snapshot, metadata,
+                )
+
+            if result.armed_variants:
+                armed_state.arm(result.armed_variants)
+
+            all_armed = armed_state.get_armed(token)
+            grouping_engine.rebuild(token, all_armed)
+
+            # Synthetic ticks from NEXT 5m candle (only for 5m candles)
+            if core_tf == Timeframe.M5 and token in candles_5m_by_token:
+                idx = candle_5m_index[token]
+                candle_5m_index[token] = idx + 1
+                candles_5m = candles_5m_by_token[token]
+                if idx + 1 < len(candles_5m):
+                    next_candle = candles_5m[idx + 1]
                     synthetic_ticks = self._generate_synthetic_ticks(token, next_candle)
                     for tick in synthetic_ticks:
                         fired = tick_engine.on_tick(tick)
@@ -395,63 +432,10 @@ class BacktestReplayEngine:
                             triggered = tick_engine.flush_trades()
                             trade_recorder.record_tick_trades(triggered)
 
-            # Also process 15m and 30m evaluations
-            candles_15m_full = self._aggregate_candles(candles_5m, 3, token, Timeframe.M15)
-            candles_30m_full = self._aggregate_candles(candles_5m, 6, token, Timeframe.M30)
-
-            for tf_candles, rtf, core_tf in [
-                (candles_15m_full, ResearchTimeframe.M15, Timeframe.M15),
-                (candles_30m_full, ResearchTimeframe.M30, Timeframe.M30),
-            ]:
-                if len(tf_candles) < 5:
-                    continue
-                # Inject all but last as history, then process each
-                candle_builder.inject_history(token, core_tf, tf_candles[:-1])
-                for candle in tf_candles:
-                    # Cache for exit engine
-                    candle_cache.on_candle(candle)
-
-                    # Inject into history and compute proper indicators for this TF
-                    candle_builder.inject_history(token, core_tf, [candle])
-                    snapshot = indicator_engine.on_candle(candle)
-                    if snapshot is None:
-                        # Fall back to M5 snapshot if not enough history
-                        snapshot = indicator_engine.get_snapshot(token, ResearchTimeframe.M5)
-                        if snapshot is None:
-                            continue
-
-                    metadata = indicator_engine.get_metadata(token)
-                    counter_key = (token, rtf)
-                    candle_counters[counter_key] += 1
-                    current_candle_idx = candle_counters[counter_key]
-
-                    # Cleanup expired for this timeframe
-                    armed_state.cleanup_expired(token, current_candle_idx, timeframe=rtf.value)
-
-                    history = candle_builder.get_history(token, core_tf)
-                    result = evaluator.evaluate(
-                        instrument=token, timeframe=rtf,
-                        candle=candle, history=history,
-                        snapshot=snapshot, metadata=metadata,
-                        candle_index=current_candle_idx,
-                    )
-                    if result.immediate_trades:
-                        trade_recorder.record_immediate_trades(
-                            result.immediate_trades, token,
-                            candle.timestamp_ms, snapshot, metadata,
-                        )
-                    if result.armed_variants:
-                        armed_state.arm(result.armed_variants)
-                        # Rebuild groups so INTRABAR triggers can fire
-                        all_armed = armed_state.get_armed(token)
-                        grouping_engine.rebuild(token, all_armed)
-
         # ─── Flush trades and run exit engine ────────────────────────────
         trade_recorder.stop()
 
-        # Run exit engine for this day
         stats = self._exit_engine.run_for_date(day_str)
-
         return stats.trades_processed if stats.trades_processed > 0 else 0
 
     def _generate_synthetic_ticks(self, token: str, candle: Candle) -> list[Tick]:
@@ -482,7 +466,17 @@ class BacktestReplayEngine:
 
     @staticmethod
     def _aggregate_candles(candles_5m: list[Candle], factor: int, token: str, tf: Timeframe) -> list[Candle]:
-        """Aggregate 5m candles into higher timeframe (3=15m, 6=30m)."""
+        """
+        Aggregate 5m candles into higher timeframe (3=15m, 6=30m).
+
+        Uses the LAST 5m candle's timestamp as the aggregate candle's timestamp.
+        This correctly represents the candle's close boundary in the timeline,
+        ensuring 15m candles sort AFTER the 5m candles they contain.
+
+        Example: 15m candle for 9:15-9:30 gets timestamp 9:25 (last 5m open),
+        which places it after the 9:15, 9:20, 9:25 5m candles in the timeline.
+        In live trading, the 15m candle only closes at 9:30 (after the 9:25 5m closes).
+        """
         aggregated = []
         for i in range(0, len(candles_5m) - factor + 1, factor):
             group = candles_5m[i:i + factor]
@@ -491,7 +485,7 @@ class BacktestReplayEngine:
             agg = Candle(
                 exchange="NSE", segment="CASH", exchange_token=token,
                 timeframe=tf,
-                timestamp_ms=group[0].timestamp_ms,
+                timestamp_ms=group[-1].timestamp_ms,  # use LAST candle's ts (close boundary)
                 open=group[0].open,
                 high=max(c.high for c in group),
                 low=min(c.low for c in group),

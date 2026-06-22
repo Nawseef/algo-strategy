@@ -38,9 +38,10 @@ class BBTemplate(BaseStrategyTemplate):
     """
 
     def __init__(self) -> None:
-        # Per-instrument squeeze tracking
-        self._squeeze_count: dict[str, int] = {}
-        self._was_in_squeeze: dict[str, bool] = {}
+        # Keyed by (token, timeframe.value) — prevents 5m evaluation stomping
+        # 15m squeeze state for the same instrument.
+        self._squeeze_count: dict[tuple[str, str], int] = {}
+        self._was_in_squeeze: dict[tuple[str, str], bool] = {}
         self._last_reset_date: str = ""
 
     @property
@@ -80,19 +81,18 @@ class BBTemplate(BaseStrategyTemplate):
         if squeeze_active is None:
             return []
 
-        prev_in_squeeze = self._was_in_squeeze.get(token, False)
+        prev_in_squeeze = self._was_in_squeeze.get((token, timeframe.value), False)
 
         if squeeze_active:
-            # Currently in squeeze — count
-            self._squeeze_count[token] = self._squeeze_count.get(token, 0) + 1
-            self._was_in_squeeze[token] = True
+            self._squeeze_count[(token, timeframe.value)] = self._squeeze_count.get((token, timeframe.value), 0) + 1
+            self._was_in_squeeze[(token, timeframe.value)] = True
             return []
 
         # Squeeze just released
         if prev_in_squeeze and not squeeze_active:
-            self._was_in_squeeze[token] = False
-            squeeze_duration = self._squeeze_count.get(token, 0)
-            self._squeeze_count[token] = 0
+            self._was_in_squeeze[(token, timeframe.value)] = False
+            squeeze_duration = self._squeeze_count.get((token, timeframe.value), 0)
+            self._squeeze_count[(token, timeframe.value)] = 0
 
             if squeeze_duration < MIN_SQUEEZE_CANDLES:
                 return []
@@ -141,8 +141,8 @@ class BBTemplate(BaseStrategyTemplate):
             return candidates
 
         # Not in squeeze and wasn't before — reset
-        self._was_in_squeeze[token] = False
-        self._squeeze_count[token] = 0
+        self._was_in_squeeze[(token, timeframe.value)] = False
+        self._squeeze_count[(token, timeframe.value)] = 0
         return []
 
     def _maybe_reset_daily(self) -> None:

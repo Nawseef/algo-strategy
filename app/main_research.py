@@ -461,6 +461,7 @@ def main() -> None:
     if research_config.warmup_enabled:
         logger.info("─── Starting Warmup ───")
         from app.warmup.data_manager import DataManager
+        from app.core.models import Timeframe as _TF
 
         instrument_map = get_instrument_map()
 
@@ -487,6 +488,19 @@ def main() -> None:
             instrument_map=instrument_map,
         )
         logger.info("Warmup: %s", warmup_result.summary())
+
+        # Seed indicator engine EMA slope state from warmup history.
+        # DataManager injects candles into candle_builder history only.
+        # Without running them through on_candle(), _prev_ema20/_prev_ema50
+        # stay at 0.0 and the first real candle produces a wrong EMA slope spike.
+        for token in research_config.instruments:
+            for tf in [_TF.M5, _TF.M15, _TF.M30]:
+                warmup_history = orchestrator._candle_builder.get_history(token, tf)
+                if warmup_history:
+                    # Run last few candles through indicator engine to seed slopes
+                    # Don't run all 50 — just enough to establish slope state (last 3)
+                    for wc in warmup_history[-3:]:
+                        orchestrator._indicator_engine.on_candle(wc)
 
     # ─── Start Orchestrator ──────────────────────────────────────────
     orchestrator.start()
