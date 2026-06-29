@@ -1,0 +1,10 @@
+[Unit]
+Description=Run algo watchdog every 15 minutes during market hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

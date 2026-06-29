@@ -1,0 +1,7 @@
+[Unit]
+Description=Algo Trading Watchdog — restart stuck services
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/algo-strategy/deploy/watchdog.sh

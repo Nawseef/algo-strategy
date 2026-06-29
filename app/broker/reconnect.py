@@ -2,8 +2,13 @@
 Reconnection manager for broker feeds.
 Wraps a BrokerFeed with automatic reconnection on failure.
 Uses exponential backoff with jitter.
+
+Key feature: consume() runs in a daemon thread with a liveness heartbeat.
+If consume() deadlocks (common with Groww NATS SDK after disconnect),
+the heartbeat detects silence and force-restarts the feed.
 """
 
+import os
 import random
 import threading
 import time
@@ -12,6 +17,7 @@ from typing import Callable
 from app.broker.base import BrokerFeed, Instrument, Tick
 from app.core.events import EventBus
 from app.utils.logger import get_logger
+from app.utils.market_hours import is_within_active_window
 
 logger = get_logger(__name__)
 
@@ -20,6 +26,12 @@ INITIAL_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
 BACKOFF_MULTIPLIER = 2.0
 JITTER_RANGE = 0.5  # ±50% jitter
+
+# Liveness detection: if no tick arrives for this long, assume feed is dead
+LIVENESS_TIMEOUT_S = 300  # 5 minutes — enough for even illiquid instruments
+
+# After market close, how long to wait before forcing exit
+POST_MARKET_GRACE_S = 120  # 2 minutes after market close, disconnect and exit
 
 
 class ReconnectingFeed:
@@ -33,11 +45,17 @@ class ReconnectingFeed:
     4. Re-subscribes to all previously subscribed instruments.
     5. Resumes consumption.
 
+    Liveness protection:
+    - consume() runs in a daemon thread.
+    - Main thread monitors last_tick_time.
+    - If no tick for LIVENESS_TIMEOUT_S during market hours → force restart.
+    - If market is closed → clean exit (let systemd restart next day).
+
     Usage:
         feed = GrowwFeedClient(broker)
         reconnecting = ReconnectingFeed(feed, event_bus, broker=broker)
         reconnecting.subscribe_ltp(instruments, on_tick=callback)
-        reconnecting.start()  # runs in a thread, auto-reconnects
+        reconnecting.start_blocking()  # runs with auto-reconnect + liveness
     """
 
     def __init__(
@@ -59,6 +77,11 @@ class ReconnectingFeed:
         self._ltp_callback: Callable[[Tick], None] | None = None
         self._retry_count = 0
 
+        # Liveness tracking
+        self._last_tick_time: float = 0.0
+        self._consume_thread: threading.Thread | None = None
+        self._consume_finished = threading.Event()
+
     def subscribe_ltp(
         self,
         instruments: list[Instrument],
@@ -72,8 +95,21 @@ class ReconnectingFeed:
         """
         self._ltp_instruments = instruments
         self._ltp_callback = on_tick
+
+        # Wrap the callback to track liveness
+        if on_tick:
+            original_callback = on_tick
+
+            def _tracked_callback(tick: Tick) -> None:
+                self._last_tick_time = time.time()
+                original_callback(tick)
+
+            self._tracked_ltp_callback = _tracked_callback
+        else:
+            self._tracked_ltp_callback = None
+
         try:
-            self._feed.subscribe_ltp(instruments, on_tick=on_tick)
+            self._feed.subscribe_ltp(instruments, on_tick=self._tracked_ltp_callback)
         except Exception as e:
             # Don't crash — the reconnect loop will handle this
             logger.warning(
@@ -107,30 +143,56 @@ class ReconnectingFeed:
         logger.info("ReconnectingFeed stopped")
 
     def _run_loop(self) -> None:
-        """Main loop: consume feed, reconnect on failure."""
+        """Main loop: consume feed with liveness monitoring, reconnect on failure."""
         while self._running:
             try:
                 logger.info("Starting feed consumption...")
                 # Ensure we have a working subscription before consuming
                 self._resubscribe()
-                self._feed.consume()
 
-                # If consume() returns normally, the feed ended cleanly
-                # Reset retry count since we had a successful session
-                self._retry_count = 0
+                # Run consume() in a daemon thread so we can monitor liveness
+                self._last_tick_time = time.time()
+                self._consume_finished.clear()
+                self._consume_thread = threading.Thread(
+                    target=self._consume_with_signal,
+                    name="feed-consume",
+                    daemon=True,
+                )
+                self._consume_thread.start()
 
-                if not self._running:
-                    break
-                logger.warning("Feed consumption ended unexpectedly")
+                # Monitor liveness from this thread
+                dead_reason = self._monitor_liveness()
+
+                if dead_reason == "market_closed":
+                    logger.info(
+                        "Market closed — disconnecting feed and exiting process. "
+                        "Systemd will restart for next trading day."
+                    )
+                    self._running = False
+                    self._force_stop_feed()
+                    # Exit the process — systemd Restart=always will bring us back
+                    os._exit(0)
+
+                elif dead_reason == "no_ticks":
+                    logger.warning(
+                        "Feed appears dead (no ticks for %ds). Force-restarting...",
+                        LIVENESS_TIMEOUT_S,
+                    )
+                    self._force_stop_feed()
+                    # Fall through to reconnection logic below
+
+                elif dead_reason == "consume_ended":
+                    # consume() returned or threw — normal reconnect path
+                    self._retry_count = 0
+                    if not self._running:
+                        break
+                    logger.warning("Feed consumption ended unexpectedly")
 
             except KeyboardInterrupt:
-                # Propagate Ctrl+C so the main shutdown handler fires
                 raise
             except SystemExit:
-                # Propagate explicit exits
                 raise
             except BaseException as e:
-                # Catch everything including SDK-level errors that bypass Exception
                 if not self._running:
                     break
                 logger.error("Feed error: %s", e, exc_info=True)
@@ -138,6 +200,14 @@ class ReconnectingFeed:
             # Reconnection logic
             if not self._running:
                 break
+
+            # If market is no longer active, just exit cleanly
+            if not is_within_active_window():
+                logger.info(
+                    "Market closed during reconnect — exiting. "
+                    "Systemd will restart for next trading day."
+                )
+                os._exit(0)
 
             self._retry_count += 1
             if self._max_retries > 0 and self._retry_count > self._max_retries:
@@ -167,6 +237,54 @@ class ReconnectingFeed:
             # Re-authenticate before reconnecting — session tokens expire
             self._reauthenticate()
 
+    def _consume_with_signal(self) -> None:
+        """Run feed.consume() and signal when it exits (normally or by error)."""
+        try:
+            self._feed.consume()
+        except Exception as e:
+            logger.error("consume() raised: %s", e)
+        finally:
+            self._consume_finished.set()
+
+    def _monitor_liveness(self) -> str:
+        """
+        Monitor the feed for liveness. Returns reason for exiting:
+        - "market_closed": market window ended, should exit process
+        - "no_ticks": feed is dead (deadlocked), should reconnect
+        - "consume_ended": consume() returned/crashed, normal reconnect
+        """
+        while self._running:
+            # Check if consume() thread exited on its own
+            if self._consume_finished.wait(timeout=30.0):
+                return "consume_ended"
+
+            # Check if market has closed
+            if not is_within_active_window():
+                # Give a grace period after market close for final ticks
+                logger.info(
+                    "Market window ended. Waiting %ds grace period...",
+                    POST_MARKET_GRACE_S,
+                )
+                time.sleep(POST_MARKET_GRACE_S)
+                return "market_closed"
+
+            # Check liveness — have we received any tick recently?
+            silence = time.time() - self._last_tick_time
+            if silence > LIVENESS_TIMEOUT_S:
+                return "no_ticks"
+
+        return "consume_ended"
+
+    def _force_stop_feed(self) -> None:
+        """Force-stop the feed. The consume thread is a daemon so it dies with the process."""
+        try:
+            self._feed.stop()
+        except Exception:
+            pass
+        # Reset for fresh connection on next attempt
+        if hasattr(self._feed, '_reset_feed'):
+            self._feed._reset_feed()
+
     def _reauthenticate(self) -> None:
         """Re-authenticate with the broker to refresh the session token."""
         if self._broker is None:
@@ -191,7 +309,7 @@ class ReconnectingFeed:
                     len(self._ltp_instruments),
                 )
                 self._feed.subscribe_ltp(
-                    self._ltp_instruments, on_tick=self._ltp_callback
+                    self._ltp_instruments, on_tick=self._tracked_ltp_callback
                 )
         except Exception as e:
             logger.error("Re-subscription failed: %s", e)
