@@ -87,12 +87,8 @@ class ReconnectingFeed:
         instruments: list[Instrument],
         on_tick: Callable[[Tick], None] | None = None,
     ) -> None:
-        """Subscribe to LTP. Stores subscription for reconnection.
-        
-        If the feed connection fails during initial subscribe, the instruments
-        are still stored and will be subscribed when start/start_blocking is called
-        (inside the reconnect loop which handles retries).
-        """
+        """Store subscription params. Actual subscription happens in _resubscribe()
+        when start/start_blocking is called — this avoids double-subscribing."""
         self._ltp_instruments = instruments
         self._ltp_callback = on_tick
 
@@ -108,14 +104,8 @@ class ReconnectingFeed:
         else:
             self._tracked_ltp_callback = None
 
-        try:
-            self._feed.subscribe_ltp(instruments, on_tick=self._tracked_ltp_callback)
-        except Exception as e:
-            # Don't crash — the reconnect loop will handle this
-            logger.warning(
-                "Initial subscription failed (%s). Will retry in reconnect loop.",
-                e,
-            )
+        # NOTE: Do NOT subscribe here. _run_loop() → _resubscribe() handles it.
+        # Subscribing here AND in _resubscribe() causes duplicate callbacks.
 
     def start(self) -> None:
         """Start the feed in a background thread with reconnection."""
