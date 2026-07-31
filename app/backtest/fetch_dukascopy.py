@@ -87,7 +87,7 @@ DEFAULT_FROM = date(2016, 8, 1)
 DEFAULT_TO = date(2026, 7, 31)
 
 TIMEFRAME = "5m"                 # stored timeframe (matches live_candles / Timeframe.M5)
-PROGRESS_TF = "5m_cfd"           # fetch_progress key, kept distinct from NSE "5m"
+PROGRESS_TF = "5m_cfd"           # fetch_progress key base, kept distinct from NSE "5m"
 DEFAULT_DELAY_MS = 250
 MAX_CHUNK_RETRIES = 4
 NODE_TIMEOUT_S = 900             # per-chunk node call ceiling (a month of 5m is small)
@@ -240,6 +240,12 @@ class DukascopyFetcher:
         end_excl = end_incl + timedelta(days=1)
         periods = iter_periods(clamped_start, end_excl, granularity)
 
+        # Resume marker is granularity-aware so a day-granularity verify run and
+        # a month/year run never collide on the same marker (which would make the
+        # wider run wrongly skip). Same granularity resumes correctly; a wider
+        # granularity simply re-fetches (idempotent writes, dukascopy-node cache).
+        progress_tf = f"{PROGRESS_TF}_{granularity}"
+
         logger.info(
             "═══ %s (%s): %d %s-chunks over %s..%s ═══",
             canonical, duka_id, len(periods), granularity, clamped_start, end_incl,
@@ -249,7 +255,7 @@ class DukascopyFetcher:
         for frm, to_excl in periods:
             marker_str = frm.isoformat()  # resume marker = actual chunk start
 
-            if not self._force and self._store.is_date_fetched(canonical, marker_str, PROGRESS_TF):
+            if not self._force and self._store.is_date_fetched(canonical, marker_str, progress_tf):
                 self.chunks_skipped += 1
                 continue
 
@@ -273,7 +279,7 @@ class DukascopyFetcher:
 
                 # Mark the chunk done even if empty (weekend/holiday span) so we
                 # don't re-attempt it on resume.
-                self._store.mark_fetched(canonical, marker_str, len(rows), PROGRESS_TF)
+                self._store.mark_fetched(canonical, marker_str, len(rows), progress_tf)
                 self.chunks_done += 1
 
                 if self.chunks_done % 10 == 0:
