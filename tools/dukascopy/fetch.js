@@ -55,9 +55,13 @@ async function main() {
   const timeframe = args.timeframe || 'm5';
   const priceType = args.price || 'bid';
   const cacheFolderPath = args.cache || path.join(__dirname, '.dukascache');
-  const batchSize = parseInt(args.batch || '10', 10);
-  const pauseBetweenBatchesMs = parseInt(args.pause || '100', 10);
-  const retryCount = parseInt(args.retries || '5', 10);
+  // Gentle defaults: Dukascopy rate-limits (HTTP 429) aggressive bursts. Low
+  // concurrency + patient retries with backoff keep a long multi-year pull from
+  // tripping the limiter. We're backgrounded, so throughput isn't the priority.
+  const batchSize = parseInt(args.batch || '5', 10);
+  const pauseBetweenBatchesMs = parseInt(args.pause || '300', 10);
+  const retryCount = parseInt(args.retries || '8', 10);
+  const pauseBetweenRetriesMs = parseInt(args.retrypause || '3000', 10);
 
   let data;
   try {
@@ -75,7 +79,7 @@ async function main() {
       batchSize,
       pauseBetweenBatchesMs,
       retryCount,
-      pauseBetweenRetriesMs: 500,
+      pauseBetweenRetriesMs, // backoff between retries (helps ride out HTTP 429)
       retryOnEmpty: false, // an empty period (weekend/holiday) is legitimate
       failAfterRetryCount: true, // after exhausting retries on a real network error, fail loud
     });
