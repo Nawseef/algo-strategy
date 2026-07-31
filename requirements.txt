@@ -3,5 +3,11 @@ growwapi>=1.5.0
 pyotp>=2.9.0
 python-dotenv>=1.0.0
 
+# MT5 CFD feed consumer (ARM VM). rpyc must be pinned to 5.2.3 to match the
+# Wine Python on the feed VM (see MT5_FEED_SETUP.md) — a mismatch breaks the
+# RPyC wire protocol.
+mt5linux>=0.1.9
+rpyc==5.2.3
+
 # Analytics (Phase 7)
 pandas>=2.0.0

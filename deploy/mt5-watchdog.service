@@ -1,0 +1,7 @@
+[Unit]
+Description=MT5 consumer watchdog — restart stuck/failed tunnel or consumer
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/algo-strategy/deploy/mt5-watchdog.sh

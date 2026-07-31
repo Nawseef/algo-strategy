@@ -217,6 +217,33 @@ CREATE INDEX IF NOT EXISTS idx_candle_lookup ON candle_cache(instrument, timefra
 
 
 -- ═══════════════════════════════════════════════════════════
+-- LIVE CANDLES — Permanent archive of live-captured candles
+-- (MT5/CFD consumer). Unlike candle_cache (temporary, exit-sim),
+-- this is a growing time-series of our own feed's candles.
+-- ═══════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS live_candles (
+    id BIGSERIAL PRIMARY KEY,
+    instrument TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    timestamp_ms BIGINT NOT NULL,
+    open DOUBLE PRECISION NOT NULL,
+    high DOUBLE PRECISION NOT NULL,
+    low DOUBLE PRECISION NOT NULL,
+    close DOUBLE PRECISION NOT NULL,
+    volume BIGINT DEFAULT 0,
+    session_date DATE NOT NULL,
+    session TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(instrument, timeframe, timestamp_ms)
+);
+
+CREATE INDEX IF NOT EXISTS idx_live_lookup ON live_candles(instrument, timeframe, timestamp_ms);
+CREATE INDEX IF NOT EXISTS idx_live_date ON live_candles(instrument, session_date);
+
+
+-- ═══════════════════════════════════════════════════════════
 -- VARIANT SCORES — Periodic scoring results
 -- ═══════════════════════════════════════════════════════════
 
@@ -447,6 +474,19 @@ CREATE TABLE IF NOT EXISTS candle_cache (
 CREATE INDEX IF NOT EXISTS idx_candle_instrument ON candle_cache(instrument, timeframe);
 CREATE INDEX IF NOT EXISTS idx_candle_session ON candle_cache(session_date);
 CREATE INDEX IF NOT EXISTS idx_candle_time ON candle_cache(timestamp_ms);
+
+CREATE TABLE IF NOT EXISTS live_candles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument TEXT NOT NULL, timeframe TEXT NOT NULL,
+    timestamp_ms REAL NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+    volume INTEGER DEFAULT 0, session_date TEXT NOT NULL,
+    session TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(instrument, timeframe, timestamp_ms)
+);
+CREATE INDEX IF NOT EXISTS idx_live_lookup ON live_candles(instrument, timeframe, timestamp_ms);
+CREATE INDEX IF NOT EXISTS idx_live_date ON live_candles(instrument, session_date);
 
 CREATE TABLE IF NOT EXISTS variant_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -805,6 +845,90 @@ class ResearchStore:
         except Exception as e:
             logger.error("Candle cache cleanup error: %s", e)
             return 0
+
+    # ─── Live Candles (permanent archive from the live feed) ─────────────────
+
+    def write_live_candle(
+        self, instrument: str, timeframe: str, timestamp_ms: float,
+        o: float, h: float, l: float, c: float, volume: int,
+        session_date: str, session: str = "",
+    ) -> None:
+        """Persist one completed live candle (idempotent on the unique key)."""
+        if self._use_postgres:
+            sql = """INSERT INTO live_candles
+                (instrument, timeframe, timestamp_ms, open, high, low, close, volume, session_date, session)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (instrument, timeframe, timestamp_ms) DO NOTHING"""
+        else:
+            sql = """INSERT OR IGNORE INTO live_candles
+                (instrument, timeframe, timestamp_ms, open, high, low, close, volume, session_date, session)
+                VALUES (?,?,?,?,?,?,?,?,?,?)"""
+        self._execute(sql, (instrument, timeframe, timestamp_ms, o, h, l, c, volume, session_date, session))
+
+    def get_live_candles(
+        self, instrument: str, timeframe: str, start_ms: float, end_ms: float,
+    ) -> list[dict]:
+        """Fetch stored live candles in a time range (ascending)."""
+        if self._use_postgres:
+            sql = """SELECT * FROM live_candles
+                WHERE instrument=%s AND timeframe=%s AND timestamp_ms >= %s AND timestamp_ms <= %s
+                ORDER BY timestamp_ms ASC"""
+        else:
+            sql = """SELECT * FROM live_candles
+                WHERE instrument=? AND timeframe=? AND timestamp_ms >= ? AND timestamp_ms <= ?
+                ORDER BY timestamp_ms ASC"""
+        return self._query(sql, (instrument, timeframe, start_ms, end_ms))
+
+    def get_live_candle_count(self, instrument: str | None = None) -> int:
+        """Count stored live candles (optionally for one instrument)."""
+        if instrument is None:
+            rows = self._query("SELECT COUNT(*) AS cnt FROM live_candles")
+        elif self._use_postgres:
+            rows = self._query("SELECT COUNT(*) AS cnt FROM live_candles WHERE instrument=%s", (instrument,))
+        else:
+            rows = self._query("SELECT COUNT(*) AS cnt FROM live_candles WHERE instrument=?", (instrument,))
+        return rows[0]["cnt"] if rows else 0
+
+    def get_last_live_candle_ms(self, instrument: str, timeframe: str) -> int | None:
+        """Open time (ms) of the most recent stored live candle, or None.
+
+        Used by the consumer's backfill to know where to resume from.
+        """
+        if self._use_postgres:
+            sql = "SELECT MAX(timestamp_ms) AS m FROM live_candles WHERE instrument=%s AND timeframe=%s"
+        else:
+            sql = "SELECT MAX(timestamp_ms) AS m FROM live_candles WHERE instrument=? AND timeframe=?"
+        rows = self._query(sql, (instrument, timeframe))
+        if rows and rows[0]["m"] is not None:
+            return int(rows[0]["m"])
+        return None
+
+    def get_live_candle_stats(self, session_date: str) -> dict[str, Any]:
+        """Totals for the daily heartbeat: overall count + today's activity."""
+        total = self.get_live_candle_count()
+        if self._use_postgres:
+            sql = ("SELECT COUNT(*) AS c, COUNT(DISTINCT instrument) AS i, MAX(timestamp_ms) AS m "
+                   "FROM live_candles WHERE session_date=%s")
+        else:
+            sql = ("SELECT COUNT(*) AS c, COUNT(DISTINCT instrument) AS i, MAX(timestamp_ms) AS m "
+                   "FROM live_candles WHERE session_date=?")
+        rows = self._query(sql, (session_date,))
+        row = rows[0] if rows else {}
+        return {
+            "total": total,
+            "today": row.get("c") or 0,
+            "instruments_today": row.get("i") or 0,
+            "last_ms": row.get("m"),
+        }
+
+    def get_live_counts_by_instrument(self, session_date: str) -> dict[str, int]:
+        """Per-instrument candle counts for a trading day (heartbeat detail)."""
+        if self._use_postgres:
+            sql = "SELECT instrument, COUNT(*) AS c FROM live_candles WHERE session_date=%s GROUP BY instrument"
+        else:
+            sql = "SELECT instrument, COUNT(*) AS c FROM live_candles WHERE session_date=? GROUP BY instrument"
+        rows = self._query(sql, (session_date,))
+        return {r["instrument"]: r["c"] for r in rows}
 
     # ─── Historical Candles (for backtesting) ────────────────────────────────
 

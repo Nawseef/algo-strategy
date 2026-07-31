@@ -1,0 +1,10 @@
+[Unit]
+Description=Send the MT5 consumer daily heartbeat at 09:00 IST
+
+[Timer]
+# VM runs IST; 09:00 local matches the feed VM's heartbeat time.
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

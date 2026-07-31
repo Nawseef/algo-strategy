@@ -1,0 +1,17 @@
+[Unit]
+Description=MT5 CFD Consumer — live 5m candles -> research_db.live_candles
+After=network-online.target postgresql.service mt5-tunnel.service
+Wants=network-online.target mt5-tunnel.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/algo-strategy
+ExecStart=/home/ubuntu/algo-strategy/venv/bin/python -m app.main_mt5
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
