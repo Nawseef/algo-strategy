@@ -81,7 +81,12 @@ async function main() {
       retryCount,
       pauseBetweenRetriesMs, // backoff between retries (helps ride out HTTP 429)
       retryOnEmpty: false, // an empty period (weekend/holiday) is legitimate
-      failAfterRetryCount: true, // after exhausting retries on a real network error, fail loud
+      // Don't let one unavailable file abort a whole chunk. Dukascopy returns a
+      // persistent HTTP 429 for some individual historical files (a known quirk,
+      // not true rate-limiting); with this false, dukascopy-node skips that file
+      // after exhausting retries and returns the rest of the range instead of
+      // throwing. Coverage holes show up in the --summary counts.
+      failAfterRetryCount: false,
     });
   } catch (err) {
     const msg = err && err.validationErrors ? JSON.stringify(err.validationErrors) : (err && err.message) || String(err);
