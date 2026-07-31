@@ -1,0 +1,11 @@
+{
+  "name": "cfd-dukascopy-fetch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Thin dukascopy-node wrapper: fetch 5m bid CFD candles for one instrument/date-range to a JSON file. Driven by the Python orchestrator (app.backtest.fetch_dukascopy).",
+  "type": "commonjs",
+  "main": "fetch.js",
+  "dependencies": {
+    "dukascopy-node": "^1.50.0"
+  }
+}

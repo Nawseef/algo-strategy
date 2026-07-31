@@ -302,6 +302,36 @@ CREATE INDEX IF NOT EXISTS idx_hist_instrument ON historical_candles(instrument,
 
 
 -- ═══════════════════════════════════════════════════════════
+-- CFD HISTORICAL CANDLES — Dukascopy 5m history for the 10 CFDs.
+-- Separate from historical_candles (NSE/Groww feed) and live_candles
+-- (our IC Markets feed). Same columns as live_candles (incl. session)
+-- so live + historical can be queried/grouped identically. Timestamps
+-- are real UTC (bar open time); price basis = bid.
+-- ═══════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS cfd_historical_candles (
+    id BIGSERIAL PRIMARY KEY,
+    instrument TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    timestamp_ms BIGINT NOT NULL,
+    open DOUBLE PRECISION NOT NULL,
+    high DOUBLE PRECISION NOT NULL,
+    low DOUBLE PRECISION NOT NULL,
+    close DOUBLE PRECISION NOT NULL,
+    volume BIGINT DEFAULT 0,
+    session_date DATE NOT NULL,
+    session TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(instrument, timeframe, timestamp_ms)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cfdhist_lookup ON cfd_historical_candles(instrument, timeframe, timestamp_ms);
+CREATE INDEX IF NOT EXISTS idx_cfdhist_date ON cfd_historical_candles(instrument, session_date);
+CREATE INDEX IF NOT EXISTS idx_cfdhist_instrument ON cfd_historical_candles(instrument, timeframe);
+
+
+-- ═══════════════════════════════════════════════════════════
 -- BACKTEST RUNS — Metadata about each backtest execution
 -- ═══════════════════════════════════════════════════════════
 
@@ -514,6 +544,19 @@ CREATE TABLE IF NOT EXISTS historical_candles (
 );
 CREATE INDEX IF NOT EXISTS idx_hist_lookup ON historical_candles(instrument, timeframe, timestamp_ms);
 CREATE INDEX IF NOT EXISTS idx_hist_date ON historical_candles(instrument, session_date);
+
+CREATE TABLE IF NOT EXISTS cfd_historical_candles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument TEXT NOT NULL, timeframe TEXT NOT NULL,
+    timestamp_ms REAL NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+    volume INTEGER DEFAULT 0, session_date TEXT NOT NULL,
+    session TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(instrument, timeframe, timestamp_ms)
+);
+CREATE INDEX IF NOT EXISTS idx_cfdhist_lookup ON cfd_historical_candles(instrument, timeframe, timestamp_ms);
+CREATE INDEX IF NOT EXISTS idx_cfdhist_date ON cfd_historical_candles(instrument, session_date);
 
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -999,6 +1042,105 @@ class ResearchStore:
                 WHERE instrument=? AND timeframe=? ORDER BY session_date"""
         rows = self._query(sql, (instrument, timeframe))
         return [str(r["session_date"]) for r in rows]
+
+    # ─── CFD Historical Candles (Dukascopy, for CFD backtesting) ─────────────
+
+    def write_cfd_historical_candles_batch(
+        self, candles: list[tuple], instrument: str, timeframe: str = "5m",
+    ) -> int:
+        """
+        Batch insert CFD historical candles (Dukascopy feed).
+
+        Each tuple: (timestamp_ms, open, high, low, close, volume, session_date, session)
+
+        Idempotent on (instrument, timeframe, timestamp_ms) — safe to re-run a
+        chunk without creating duplicates. Mirrors live_candles storage so live
+        and historical can be queried/grouped identically.
+        """
+        if not candles:
+            return 0
+
+        rows = [(instrument, timeframe, *c) for c in candles]
+
+        if self._use_postgres:
+            sql = """INSERT INTO cfd_historical_candles
+                (instrument, timeframe, timestamp_ms, open, high, low, close, volume, session_date, session)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (instrument, timeframe, timestamp_ms) DO NOTHING"""
+        else:
+            sql = """INSERT OR IGNORE INTO cfd_historical_candles
+                (instrument, timeframe, timestamp_ms, open, high, low, close, volume, session_date, session)
+                VALUES (?,?,?,?,?,?,?,?,?,?)"""
+
+        try:
+            with self._lock:
+                if self._use_postgres:
+                    conn = self._pg_pool.getconn()
+                    try:
+                        with conn.cursor() as cur:
+                            cur.executemany(sql, rows)
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+                    finally:
+                        self._pg_pool.putconn(conn)
+                else:
+                    self._sqlite_conn.executemany(sql, rows)
+                    self._sqlite_conn.commit()
+                return len(rows)
+        except Exception as e:
+            logger.error("CFD historical candle write error: %s", e)
+            return 0
+
+    def get_cfd_historical_candles(
+        self, instrument: str, timeframe: str, start_ms: float, end_ms: float,
+    ) -> list[dict]:
+        """Get CFD historical candles for backtesting (ascending)."""
+        if self._use_postgres:
+            sql = """SELECT * FROM cfd_historical_candles
+                WHERE instrument=%s AND timeframe=%s AND timestamp_ms >= %s AND timestamp_ms <= %s
+                ORDER BY timestamp_ms ASC"""
+        else:
+            sql = """SELECT * FROM cfd_historical_candles
+                WHERE instrument=? AND timeframe=? AND timestamp_ms >= ? AND timestamp_ms <= ?
+                ORDER BY timestamp_ms ASC"""
+        return self._query(sql, (instrument, timeframe, start_ms, end_ms))
+
+    def get_cfd_historical_count(self, instrument: str | None = None, timeframe: str = "5m") -> int:
+        """Count stored CFD historical candles (optionally for one instrument)."""
+        if instrument is None:
+            if self._use_postgres:
+                rows = self._query("SELECT COUNT(*) AS cnt FROM cfd_historical_candles WHERE timeframe=%s", (timeframe,))
+            else:
+                rows = self._query("SELECT COUNT(*) AS cnt FROM cfd_historical_candles WHERE timeframe=?", (timeframe,))
+        elif self._use_postgres:
+            rows = self._query(
+                "SELECT COUNT(*) AS cnt FROM cfd_historical_candles WHERE instrument=%s AND timeframe=%s",
+                (instrument, timeframe),
+            )
+        else:
+            rows = self._query(
+                "SELECT COUNT(*) AS cnt FROM cfd_historical_candles WHERE instrument=? AND timeframe=?",
+                (instrument, timeframe),
+            )
+        return rows[0]["cnt"] if rows else 0
+
+    def get_cfd_historical_summary(self, timeframe: str = "5m") -> list[dict]:
+        """Per-instrument summary (count + date span) for verification/heartbeat."""
+        if self._use_postgres:
+            sql = """SELECT instrument, COUNT(*) AS candles,
+                        MIN(session_date) AS first_date, MAX(session_date) AS last_date,
+                        MIN(timestamp_ms) AS first_ms, MAX(timestamp_ms) AS last_ms
+                     FROM cfd_historical_candles WHERE timeframe=%s
+                     GROUP BY instrument ORDER BY instrument"""
+        else:
+            sql = """SELECT instrument, COUNT(*) AS candles,
+                        MIN(session_date) AS first_date, MAX(session_date) AS last_date,
+                        MIN(timestamp_ms) AS first_ms, MAX(timestamp_ms) AS last_ms
+                     FROM cfd_historical_candles WHERE timeframe=?
+                     GROUP BY instrument ORDER BY instrument"""
+        return self._query(sql, (timeframe,))
 
     # ─── Fetch Progress ──────────────────────────────────────────────────────
 
