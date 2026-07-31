@@ -1,0 +1,11 @@
+[Unit]
+Description=MT5 CFD consumer daily heartbeat -> CFD Telegram
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/algo-strategy
+ExecStart=/home/ubuntu/algo-strategy/venv/bin/python -m app.mt5_heartbeat
+Environment=PYTHONUNBUFFERED=1

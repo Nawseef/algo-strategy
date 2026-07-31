@@ -1,0 +1,26 @@
+[Unit]
+Description=MT5 feed SSH tunnel (ARM consumer -> x86 feed :8001)
+After=network-online.target
+Wants=network-online.target
+# Never give up retrying (disable systemd start-rate limiting).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+# -N: no remote command, -T: no pty. Keepalives make ssh exit within ~45s of a
+# dead link so systemd restarts it. ExitOnForwardFailure exits if :8001 can't bind.
+ExecStart=/usr/bin/ssh -NT \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=/home/ubuntu/.ssh/known_hosts \
+  -i /home/ubuntu/.ssh/mt5_feed.key \
+  -L 8001:localhost:8001 \
+  ubuntu@144.24.154.233
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -11,13 +11,25 @@ from typing import Any, Callable
 
 @dataclass
 class Tick:
-    """Normalized tick data from any broker."""
+    """Normalized tick data from any broker.
+
+    ``ltp`` is the single price everything downstream consumes (candle builder,
+    indicators, strategies). For exchange-traded instruments (NSE/Groww) it is
+    the last traded price. For OTC CFDs (IC Markets/MT5) there is no last traded
+    price, so ``ltp`` is populated with the ``bid`` (see MT5_FEED_SETUP.md).
+
+    ``bid``/``ask`` are optional and only populated by feeds that quote a
+    two-sided market (CFDs). They let us measure spread and model fills
+    (buy@ask, sell@bid) without changing any downstream code that reads ``ltp``.
+    """
 
     exchange: str
     segment: str
     exchange_token: str
     ltp: float
     timestamp_ms: float
+    bid: float = 0.0
+    ask: float = 0.0
 
 
 @dataclass
