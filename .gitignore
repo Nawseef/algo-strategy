@@ -28,8 +28,5 @@ data/*.db-wal
 data/*.sqlite
 data/paper_trades.json
 
-# Dukascopy fetch tool (Node deps + local cache)
-tools/dukascopy/node_modules/
-tools/dukascopy/.dukascache/
-tools/dukascopy/*.tmp
+# Dukascopy fetch (background runner pidfile)
 logs/dukascopy_fetch.pid
