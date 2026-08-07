@@ -34,7 +34,7 @@ class MT5Config:
     """
 
     host: str = field(default_factory=lambda: os.getenv("MT5_HOST", "localhost"))
-    port: int = field(default_factory=lambda: int(os.getenv("MT5_PORT", "8001")))
+    port: int = field(default_factory=lambda: _parse_int("MT5_PORT", 8001))
     # The 10 IC Markets CFD symbols (exact broker names).
     symbols: list[str] = field(
         default_factory=lambda: _parse_list(
@@ -93,6 +93,61 @@ class MT5Config:
     def segment(self) -> str:
         """Synthetic segment label used in Tick/Candle for CFDs."""
         return os.getenv("MT5_SEGMENT", "CFD")
+
+
+@dataclass
+class CTraderConfig:
+    """cTrader Open API (IC Markets CFD) configuration.
+
+    Replaces the MT5 feed VM entirely — connects directly to Spotware's
+    cloud via WebSocket/TCP, receives push-based spot events (bid/ask on
+    every price change), and can also place orders. Runs natively on ARM
+    Linux (no Wine/Docker/RPyC).
+    """
+
+    client_id: str = field(default_factory=lambda: os.getenv("CTRADER_CLIENT_ID", ""))
+    client_secret: str = field(default_factory=lambda: os.getenv("CTRADER_CLIENT_SECRET", ""))
+    access_token: str = field(default_factory=lambda: os.getenv("CTRADER_ACCESS_TOKEN", ""))
+    refresh_token: str = field(default_factory=lambda: os.getenv("CTRADER_REFRESH_TOKEN", ""))
+    token_expires_at: int = field(default_factory=lambda: _parse_int("CTRADER_TOKEN_EXPIRES_AT", 0))
+    # Your cTrader trader login number (visible in the platform header).
+    account_login: int = field(default_factory=lambda: _parse_int("CTRADER_ACCOUNT_LOGIN", 0))
+    # "demo" or "live"
+    env: str = field(default_factory=lambda: os.getenv("CTRADER_ENV", "demo"))
+    # The 10 IC Markets CFD symbols (string names — resolved to numeric IDs on connect).
+    symbols: list[str] = field(
+        default_factory=lambda: _parse_list(
+            "CTRADER_SYMBOLS",
+            "XAUUSD,XAGUSD,EURUSD,GBPUSD,USDJPY,US30,US500,USTEC,DE40,XTIUSD",
+        )
+    )
+    # Dedicated CFD Telegram bot (same as MT5 consumer used).
+    telegram_bot_token: str = field(default_factory=lambda: os.getenv("CTRADER_TELEGRAM_BOT_TOKEN", ""))
+    telegram_chat_ids: list[str] = field(
+        default_factory=lambda: _parse_list("CTRADER_TELEGRAM_CHAT_ID", "")
+    )
+
+    @property
+    def host(self) -> str:
+        """Protobuf API host based on environment."""
+        if self.env == "live":
+            return "live.ctraderapi.com"
+        return "demo.ctraderapi.com"
+
+    @property
+    def port(self) -> int:
+        """Protobuf API port (same for demo and live)."""
+        return 5035
+
+    @property
+    def exchange(self) -> str:
+        """Synthetic exchange label used in Tick/Candle for CFDs."""
+        return "ICMARKETS"
+
+    @property
+    def segment(self) -> str:
+        """Synthetic segment label used in Tick/Candle for CFDs."""
+        return "CFD"
 
 
 @dataclass
@@ -185,6 +240,33 @@ def _parse_optional_float(env_key: str) -> float | None:
         return None
 
 
+def _parse_int(env_key: str, default: int) -> int:
+    """Return int(env) if set to a valid value, else ``default``.
+
+    Robust against an env var that is present but EMPTY (e.g. an
+    unfilled ``CTRADER_ACCOUNT_LOGIN=`` in .env), which would otherwise crash
+    ``int('')`` and take down config loading for every entrypoint.
+    """
+    raw = os.getenv(env_key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _parse_float(env_key: str, default: float) -> float:
+    """Return float(env) if set to a valid value, else ``default`` (empty-safe)."""
+    raw = os.getenv(env_key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _parse_list(env_key: str, default: str) -> list[str]:
     raw = os.getenv(env_key, default)
     return [v.strip() for v in raw.split(",") if v.strip()]
@@ -196,6 +278,7 @@ class AppConfig:
 
     groww: GrowwConfig = field(default_factory=GrowwConfig)
     mt5: MT5Config = field(default_factory=MT5Config)
+    ctrader: CTraderConfig = field(default_factory=CTraderConfig)
     instruments: InstrumentConfig = field(default_factory=InstrumentConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     paper_trading: PaperTradingConfig = field(default_factory=PaperTradingConfig)

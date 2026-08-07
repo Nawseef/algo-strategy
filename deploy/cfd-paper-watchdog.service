@@ -1,0 +1,7 @@
+[Unit]
+Description=CFD paper-trader watchdog — restart stuck/failed tunnel or runner
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/algo-strategy/deploy/cfd-paper-watchdog.sh
