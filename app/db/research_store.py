@@ -244,6 +244,58 @@ CREATE INDEX IF NOT EXISTS idx_live_date ON live_candles(instrument, session_dat
 
 
 -- ═══════════════════════════════════════════════════════════
+-- CFD PAPER TRADES — Executed paper/live CFD trades (cTrader).
+-- One row per CLOSED trade. Separate from the NSE paper_trades table
+-- (which lives in main_paper.py) and from the research trades table.
+-- Carries the full SL/TP/RR + exit detail for review and scoring.
+-- ═══════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS cfd_paper_trades (
+    id BIGSERIAL PRIMARY KEY,
+    position_id TEXT UNIQUE NOT NULL,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    mode TEXT NOT NULL DEFAULT 'PAPER',        -- PAPER / LIVE
+
+    strategy_id TEXT NOT NULL,
+    variant_id TEXT NOT NULL,
+    instrument TEXT NOT NULL,
+    direction TEXT NOT NULL,                    -- LONG / SHORT
+    entry_mode TEXT NOT NULL,                   -- CANDLE_CLOSE / INTRABAR
+
+    entry_price DOUBLE PRECISION NOT NULL,
+    entry_time_ms BIGINT NOT NULL,
+    exit_price DOUBLE PRECISION NOT NULL,
+    exit_time_ms BIGINT NOT NULL,
+
+    stop_loss DOUBLE PRECISION NOT NULL,
+    take_profits TEXT NOT NULL DEFAULT '',      -- comma-separated TP prices
+    planned_rr DOUBLE PRECISION DEFAULT 0,      -- furthest-TP R:R at entry
+
+    lots DOUBLE PRECISION NOT NULL,
+    exit_reason TEXT NOT NULL,                  -- STOP_LOSS / TAKE_PROFIT / ...
+    realized_rr DOUBLE PRECISION DEFAULT 0,     -- fraction-weighted realized R
+
+    pnl_price DOUBLE PRECISION DEFAULT 0,       -- price-space PnL (gross)
+    pnl_usd DOUBLE PRECISION DEFAULT 0,         -- USD PnL before costs
+    cost_usd DOUBLE PRECISION DEFAULT 0,        -- spread+commission+slippage
+    net_pnl_usd DOUBLE PRECISION DEFAULT 0,     -- pnl_usd - cost_usd
+
+    mfe_price DOUBLE PRECISION DEFAULT 0,       -- max favorable excursion (price)
+    mae_price DOUBLE PRECISION DEFAULT 0,       -- max adverse excursion (price)
+
+    session TEXT DEFAULT '',
+    session_date DATE,
+    reason TEXT DEFAULT '',                     -- strategy's signal reason
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_account ON cfd_paper_trades(account_id);
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_strategy ON cfd_paper_trades(strategy_id, variant_id);
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_instrument ON cfd_paper_trades(instrument);
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_exit_time ON cfd_paper_trades(exit_time_ms);
+
+
+-- ═══════════════════════════════════════════════════════════
 -- VARIANT SCORES — Periodic scoring results
 -- ═══════════════════════════════════════════════════════════
 
@@ -517,6 +569,42 @@ CREATE TABLE IF NOT EXISTS live_candles (
 );
 CREATE INDEX IF NOT EXISTS idx_live_lookup ON live_candles(instrument, timeframe, timestamp_ms);
 CREATE INDEX IF NOT EXISTS idx_live_date ON live_candles(instrument, session_date);
+
+CREATE TABLE IF NOT EXISTS cfd_paper_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id TEXT UNIQUE NOT NULL,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    mode TEXT NOT NULL DEFAULT 'PAPER',
+    strategy_id TEXT NOT NULL,
+    variant_id TEXT NOT NULL,
+    instrument TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    entry_mode TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    entry_time_ms REAL NOT NULL,
+    exit_price REAL NOT NULL,
+    exit_time_ms REAL NOT NULL,
+    stop_loss REAL NOT NULL,
+    take_profits TEXT NOT NULL DEFAULT '',
+    planned_rr REAL DEFAULT 0,
+    lots REAL NOT NULL,
+    exit_reason TEXT NOT NULL,
+    realized_rr REAL DEFAULT 0,
+    pnl_price REAL DEFAULT 0,
+    pnl_usd REAL DEFAULT 0,
+    cost_usd REAL DEFAULT 0,
+    net_pnl_usd REAL DEFAULT 0,
+    mfe_price REAL DEFAULT 0,
+    mae_price REAL DEFAULT 0,
+    session TEXT DEFAULT '',
+    session_date TEXT,
+    reason TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_account ON cfd_paper_trades(account_id);
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_strategy ON cfd_paper_trades(strategy_id, variant_id);
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_instrument ON cfd_paper_trades(instrument);
+CREATE INDEX IF NOT EXISTS idx_cfdpaper_exit_time ON cfd_paper_trades(exit_time_ms);
 
 CREATE TABLE IF NOT EXISTS variant_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -972,6 +1060,60 @@ class ResearchStore:
             sql = "SELECT instrument, COUNT(*) AS c FROM live_candles WHERE session_date=? GROUP BY instrument"
         rows = self._query(sql, (session_date,))
         return {r["instrument"]: r["c"] for r in rows}
+
+    # ─── CFD Paper/Live Trades ───────────────────────────────────────────────
+
+    def write_cfd_paper_trade(self, trade: dict[str, Any]) -> None:
+        """Persist one CLOSED CFD paper/live trade (idempotent on position_id).
+
+        Expected keys (missing keys default sensibly):
+            position_id, account_id, mode, strategy_id, variant_id, instrument,
+            direction, entry_mode, entry_price, entry_time_ms, exit_price,
+            exit_time_ms, stop_loss, take_profits, planned_rr, lots, exit_reason,
+            realized_rr, pnl_price, pnl_usd, cost_usd, net_pnl_usd, mfe_price,
+            mae_price, session, session_date, reason
+        """
+        cols = (
+            "position_id", "account_id", "mode", "strategy_id", "variant_id",
+            "instrument", "direction", "entry_mode", "entry_price", "entry_time_ms",
+            "exit_price", "exit_time_ms", "stop_loss", "take_profits", "planned_rr",
+            "lots", "exit_reason", "realized_rr", "pnl_price", "pnl_usd", "cost_usd",
+            "net_pnl_usd", "mfe_price", "mae_price", "session", "session_date", "reason",
+        )
+        params = tuple(trade.get(c) for c in cols)
+        col_str = ", ".join(cols)
+        if self._use_postgres:
+            placeholders = ", ".join(["%s"] * len(cols))
+            sql = (f"INSERT INTO cfd_paper_trades ({col_str}) VALUES ({placeholders}) "
+                   f"ON CONFLICT (position_id) DO NOTHING")
+        else:
+            placeholders = ", ".join(["?"] * len(cols))
+            sql = f"INSERT OR IGNORE INTO cfd_paper_trades ({col_str}) VALUES ({placeholders})"
+        self._execute(sql, params)
+
+    def get_cfd_paper_trades(
+        self, account_id: str | None = None, strategy_id: str | None = None,
+    ) -> list[dict]:
+        """Fetch CFD paper/live trades, optionally filtered by account/strategy."""
+        clauses = []
+        params: list[Any] = []
+        ph = "%s" if self._use_postgres else "?"
+        if account_id is not None:
+            clauses.append(f"account_id={ph}")
+            params.append(account_id)
+        if strategy_id is not None:
+            clauses.append(f"strategy_id={ph}")
+            params.append(strategy_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM cfd_paper_trades{where} ORDER BY exit_time_ms ASC"
+        return self._query(sql, tuple(params))
+
+    def get_cfd_paper_pnl_by_account(self) -> dict[str, float]:
+        """Cumulative net USD PnL per account (all time)."""
+        sql = ("SELECT account_id, SUM(net_pnl_usd) AS total "
+               "FROM cfd_paper_trades GROUP BY account_id")
+        rows = self._query(sql)
+        return {r["account_id"]: (r["total"] or 0.0) for r in rows}
 
     # ─── Historical Candles (for backtesting) ────────────────────────────────
 

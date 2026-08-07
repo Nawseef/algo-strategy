@@ -9,5 +9,9 @@ python-dotenv>=1.0.0
 mt5linux>=0.1.9
 rpyc==5.2.3
 
+# cTrader Open API feed (replaces MT5 feed VM — no Wine/Docker/RPyC needed).
+# Asyncio-based, push model, auto-reconnect + token refresh built in.
+ctrader-api-client>=0.2.0
+
 # Analytics (Phase 7)
 pandas>=2.0.0

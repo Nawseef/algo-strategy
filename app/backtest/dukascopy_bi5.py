@@ -39,10 +39,29 @@ _DEFAULT_WORKERS = 16
 _BI5_DTYPE = np.dtype([("ms", ">u4"), ("ask", ">u4"), ("bid", ">u4"), ("av", ">f4"), ("bv", ">f4")])
 
 # Shared keep-alive session (thread-safe for GETs; pool sized for our workers).
+# NOTE: connection reuse is CRITICAL — a cold TCP+TLS handshake to Dukascopy's
+# datafeed endpoint costs ~10s, but a reused connection is ~0.3s. So we keep a
+# single persistent session AND a single persistent thread pool alive for the
+# whole run; recreating either per-day lets the connections die and re-handshake
+# (which was making each day ~10s instead of ~3s).
 _session = requests.Session()
-_adapter = HTTPAdapter(pool_connections=8, pool_maxsize=_DEFAULT_WORKERS * 2, max_retries=0)
+_adapter = HTTPAdapter(pool_connections=8, pool_maxsize=_DEFAULT_WORKERS * 3, max_retries=0)
 _session.mount("https://", _adapter)
 _session.headers.update(_UA)
+
+# Persistent thread pool (lazy, reused across all days to keep connections warm).
+_executor: cf.ThreadPoolExecutor | None = None
+_executor_workers = 0
+
+
+def _get_executor(workers: int) -> cf.ThreadPoolExecutor:
+    global _executor, _executor_workers
+    if _executor is None or _executor_workers != workers:
+        if _executor is not None:
+            _executor.shutdown(wait=False)
+        _executor = cf.ThreadPoolExecutor(max_workers=workers)
+        _executor_workers = workers
+    return _executor
 
 
 def _hour_url(bi5_name: str, dt: datetime) -> str:
@@ -129,10 +148,10 @@ def fetch_day_m5(bi5_name: str, day: date, point: float, max_workers: int = _DEF
     """
     hours = [datetime(day.year, day.month, day.day, h, tzinfo=timezone.utc) for h in range(24)]
     results: list = [None] * 24
-    with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        fut_to_idx = {ex.submit(_fetch_hour, bi5_name, dt, point): i for i, dt in enumerate(hours)}
-        for fut in cf.as_completed(fut_to_idx):
-            results[fut_to_idx[fut]] = fut.result()
+    ex = _get_executor(max_workers)  # persistent pool — keeps connections warm across days
+    fut_to_idx = {ex.submit(_fetch_hour, bi5_name, dt, point): i for i, dt in enumerate(hours)}
+    for fut in cf.as_completed(fut_to_idx):
+        results[fut_to_idx[fut]] = fut.result()
 
     ts_parts, bid_parts = [], []
     failed = 0
@@ -151,3 +170,47 @@ def fetch_day_m5(bi5_name: str, day: date, point: float, max_workers: int = _DEF
         bid_all = np.empty(0, dtype=np.float64)
 
     return _aggregate_m5(ts_all, bid_all), failed
+
+
+def fetch_days_m5(bi5_name: str, days: list[date], point: float,
+                  max_workers: int = _DEFAULT_WORKERS) -> dict:
+    """Fetch MANY UTC days' ticks in one continuous batch, then aggregate each
+    day to 5m bid candles.
+
+    All (day, hour) requests are submitted to the persistent pool at once, so the
+    HTTP connections stay continuously busy (warm) for the whole batch instead of
+    going idle between days — which is what let Dukascopy close them and forced a
+    ~10s cold TLS handshake every day. Warm connections are ~0.2s vs ~10s cold.
+
+    Returns {day: (candles, failed_hours)} where candles = [(ts,o,h,l,c,vol)].
+    """
+    if not days:
+        return {}
+    ex = _get_executor(max_workers)
+    day_hours = {d: [None] * 24 for d in days}
+    fut_map = {}
+    for d in days:
+        for h in range(24):
+            dt = datetime(d.year, d.month, d.day, h, tzinfo=timezone.utc)
+            fut_map[ex.submit(_fetch_hour, bi5_name, dt, point)] = (d, h)
+    for fut in cf.as_completed(fut_map):
+        d, h = fut_map[fut]
+        day_hours[d][h] = fut.result()
+
+    out = {}
+    for d in days:
+        ts_parts, bid_parts, failed = [], [], 0
+        for r in day_hours[d]:
+            if r is None:
+                failed += 1
+            else:
+                ts_parts.append(r[0])
+                bid_parts.append(r[1])
+        if ts_parts:
+            ts_all = np.concatenate(ts_parts)
+            bid_all = np.concatenate(bid_parts)
+        else:
+            ts_all = np.empty(0, dtype=np.int64)
+            bid_all = np.empty(0, dtype=np.float64)
+        out[d] = (_aggregate_m5(ts_all, bid_all), failed)
+    return out

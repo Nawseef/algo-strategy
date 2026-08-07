@@ -213,6 +213,42 @@ class MT5Broker(BaseBroker):
             for sym in self._config.symbols
         ]
 
+    def get_symbol_spec(self, symbol: str) -> dict[str, Any] | None:
+        """Read the AUTHORITATIVE contract spec for a symbol from the broker.
+
+        MT5's ``symbol_info`` reports the exact contract size and tick economics
+        the broker uses for P&L. The dollar value of a 1.0 price move per lot is
+        ``trade_tick_value / trade_tick_size`` (already in the account currency,
+        so cross-currency conversion is baked in) — this is more reliable than
+        computing it from ounces/units, and it differs by broker (e.g. IC
+        Markets silver is 1000 oz, others 5000). Read-only; safe to call anytime.
+
+        Returns a dict of the relevant fields, or ``None`` if unavailable.
+        """
+        if self._mt5 is None:
+            return None
+        try:
+            self._mt5.symbol_select(symbol, True)
+            si = self._mt5.symbol_info(symbol)
+            if si is None:
+                return None
+            d = si._asdict()
+        except Exception as e:  # noqa: BLE001 - never let a spec query break the app
+            logger.warning("symbol_info(%s) failed: %s", symbol, e)
+            return None
+        return {
+            "symbol": symbol,
+            "contract_size": d.get("trade_contract_size"),
+            "tick_value": d.get("trade_tick_value"),
+            "tick_size": d.get("trade_tick_size"),
+            "point": d.get("point"),
+            "digits": d.get("digits"),
+            "volume_min": d.get("volume_min"),
+            "volume_step": d.get("volume_step"),
+            "volume_max": d.get("volume_max"),
+            "currency_profit": d.get("currency_profit"),
+        }
+
     def _safe_last_error(self) -> Any:
         try:
             return self._mt5.last_error()

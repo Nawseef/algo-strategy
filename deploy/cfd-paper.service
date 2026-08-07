@@ -1,0 +1,20 @@
+[Unit]
+Description=CFD Paper Trader — feed -> 5m candles -> strategies -> paper executor
+# Needs the SSH tunnel to the x86 feed VM and Postgres. Runs INSTEAD of
+# mt5-consumer (both poll the same feed — do not enable both at once).
+After=network-online.target postgresql.service mt5-tunnel.service
+Wants=network-online.target mt5-tunnel.service
+Conflicts=mt5-consumer.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/algo-strategy
+ExecStart=/home/ubuntu/algo-strategy/venv/bin/python -m app.main_cfd_paper
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
