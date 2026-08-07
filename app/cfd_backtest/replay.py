@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 from app.cfd_backtest.exit_simulator import SimulatedTrade, simulate_exit
+from app.cfd_research.regime import classify_regime, classify_volatility
 from app.cfd_risk.costs import COST_MODEL_INTRADAY, CFDCostModel
 from app.cfd_risk.instruments import get_instrument
 from app.cfd_risk.position_sizing import calculate_lot_size
@@ -58,6 +59,13 @@ class BacktestConfig:
     max_hold_bars: int = 2000
     # Persist each trade to cfd_paper_trades (mode='BACKTEST')?
     persist: bool = False
+    # Research default: resolve EVERY signal independently (no stacking guard),
+    # so scoring sees each entry's true outcome. Concurrency/stacking limits are
+    # applied later at the scoring layer (portfolio_sim), NOT here. Set False to
+    # restore "one open position per (strategy, variant, direction) at a time".
+    # (Requires edge-triggered strategies — fire on the event, not every bar —
+    #  and is intended with compound=False so sizing stays constant.)
+    record_all_signals: bool = True
 
 
 @dataclass
@@ -202,6 +210,7 @@ class CFDBacktestReplay:
                         sig, candles, i, balance, busy_until,
                     )
                     if trade is not None:
+                        self._tag_trade(trade, sig, history, strat)
                         trades.append(trade)
                         if cfg.compound:
                             balance += trade.net_pnl_usd
@@ -222,9 +231,10 @@ class CFDBacktestReplay:
         cfg = self._config
         key = (sig.strategy_id, sig.variant_id, sig.direction.value)
 
-        # Skip if this key is still in an open trade.
-        busy = busy_until.get(key, 0.0)
-        if sig.timestamp_ms < busy:
+        # Stacking guard (research default OFF via record_all_signals). When off,
+        # every signal is resolved independently so the true outcome of each
+        # entry is recorded; when on, a key holds one position at a time.
+        if not cfg.record_all_signals and sig.timestamp_ms < busy_until.get(key, 0.0):
             return None
 
         fill_idx, fill_price, fill_time = self._resolve_fill(sig, candles, signal_idx)
@@ -258,8 +268,9 @@ class CFDBacktestReplay:
             cost_model=cfg.cost_model,
         )
 
-        # Mark the key busy until the trade closes.
-        busy_until[key] = trade.exit_time_ms
+        # Mark the key busy until the trade closes (only when the guard is on).
+        if not cfg.record_all_signals:
+            busy_until[key] = trade.exit_time_ms
         return trade
 
     def _resolve_fill(
@@ -288,6 +299,24 @@ class CFDBacktestReplay:
             if touched:
                 return j, trigger, c.timestamp_ms
         return None, 0.0, 0.0
+
+    # ─── Research tagging ────────────────────────────────────────
+
+    def _tag_trade(self, trade: SimulatedTrade, sig: CFDSignal,
+                   history: list[Candle], strat: CFDStrategy) -> None:
+        """Stamp the trade with session / regime / volatility / exit-model / TF.
+
+        These tags are what the slice scorer groups by to answer "which session /
+        which market condition / which exit model actually passes." ``history`` is
+        the candle series up to and including the signal bar (what the strategy
+        saw), so regime/volatility reflect the entry context.
+        """
+        entry_dt = datetime.fromtimestamp(trade.entry_time_ms / 1000, timezone.utc)
+        trade.session = forex_hours.session_tag(entry_dt)
+        trade.regime = classify_regime(history)
+        trade.volatility = classify_volatility(history)
+        trade.exit_model = getattr(sig.exit_plan, "exit_model", "") or "default"
+        trade.timeframe = strat.timeframe.value
 
     # ─── Persistence ─────────────────────────────────────────────
 

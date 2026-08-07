@@ -171,6 +171,80 @@ def test_replay_end_to_end_win():
         os.remove(tmp)
 
 
+class _FiresEveryBarInRange(CFDStrategy):
+    """Fires a LONG on every bar while history length is in [3, 7] (5 signals)."""
+
+    strategy_id = "test_fires_many"
+    name = "Test Fires Many"
+    timeframe = Timeframe.M5
+    instruments = ("XAUUSD",)
+    min_history = 3
+    variants = ("default",)
+
+    def evaluate(self, ctx: StrategyContext) -> list[CFDSignal]:
+        if not (3 <= len(ctx.history) <= 7):
+            return []
+        entry = ctx.close
+        plan = build_rr_exit_plan(Direction.LONG, entry, entry - 10.0, rr_targets=[2.0])
+        return [CFDSignal(
+            strategy_id=self.strategy_id, variant_id="default", instrument=ctx.instrument,
+            direction=Direction.LONG, entry_mode=EntryMode.CANDLE_CLOSE,
+            entry_price=entry, exit_plan=plan, timestamp_ms=ctx.candle.timestamp_ms,
+        )]
+
+
+def _run_fires_many(record_all_signals: bool) -> int:
+    tmp = tempfile.mktemp(suffix=".db")
+    from app.db.research_store import ResearchStore
+    store = ResearchStore(db_path=Path(tmp))
+    store.start()
+    try:
+        _seed_candles(store, n=20, start_price=2400.0)   # steady rise
+        cfg = BacktestConfig(
+            starting_balance=100_000.0, risk_pct=1.0, cost_model=COST_MODEL_ZERO,
+            compound=False, record_all_signals=record_all_signals,
+        )
+        replay = CFDBacktestReplay([_FiresEveryBarInRange()], store, cfg)
+        result = replay.run(["XAUUSD"], date(2026, 3, 2), date(2026, 3, 3))
+        return result.total_trades
+    finally:
+        store.stop()
+        os.remove(tmp)
+
+
+def test_record_all_signals_captures_every_entry():
+    # Record-all (research default): all 5 overlapping signals become trades.
+    n_all = _run_fires_many(record_all_signals=True)
+    # Guard on: overlapping signals for the same key are collapsed -> fewer trades.
+    n_guard = _run_fires_many(record_all_signals=False)
+    assert n_all == 5
+    assert n_guard < n_all
+
+
+def test_trades_are_tagged_with_session_regime_tf():
+    tmp = tempfile.mktemp(suffix=".db")
+    from app.db.research_store import ResearchStore
+    store = ResearchStore(db_path=Path(tmp))
+    store.start()
+    try:
+        # 60 rising bars so the regime classifier has enough history (needs ~51).
+        _seed_candles(store, n=60, start_price=2400.0)
+        strat = _AlwaysLongAtClose(fire_on_index=55)   # fire late, plenty of history
+        cfg = BacktestConfig(starting_balance=100_000.0, risk_pct=1.0,
+                             cost_model=COST_MODEL_ZERO, compound=False)
+        replay = CFDBacktestReplay([strat], store, cfg)
+        result = replay.run(["XAUUSD"], date(2026, 3, 2), date(2026, 3, 4))
+        assert result.total_trades == 1
+        t = result.trades[0]
+        assert t.session != ""                      # tagged from entry time
+        assert t.regime in ("trend_up", "trend_down", "range")
+        assert t.volatility in ("loVol", "normalVol", "hiVol")
+        assert t.timeframe == "5m"
+    finally:
+        store.stop()
+        os.remove(tmp)
+
+
 def test_replay_no_trades_when_history_insufficient():
     tmp = tempfile.mktemp(suffix=".db")
     from app.db.research_store import ResearchStore
