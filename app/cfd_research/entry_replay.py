@@ -44,21 +44,31 @@ def replay_entries(
     cost_model: CFDCostModel | None = None,
     atr_period: int = 14,
     max_hold_bars: int = 2000,
+    history_window: int = 400,
 ) -> list[SimulatedTrade]:
-    """Resolve every entry under every exit model; return tagged trades."""
+    """Resolve every entry under every exit model; return tagged trades.
+
+    ``history_window`` bounds how many trailing bars are passed to the strategy /
+    regime classifier each step. This keeps the walk O(n * window) instead of
+    O(n^2): building ``candles[:i+1]`` every bar is quadratic and made a 10-year
+    run take hours. 400 bars comfortably covers the regime/volatility lookbacks
+    (EMA50 / ATR100) and typical indicators; raise it for a strategy that needs
+    more trailing history.
+    """
     if not strategy.applies_to(instrument):
         return []
     models = exit_models or default_exit_models()
     cost_model = cost_model or COST_MODEL_INTRADAY
+    window = max(history_window, strategy.min_history)
 
     trades: list[SimulatedTrade] = []
     tf = strategy.timeframe.value
     n = len(candles)
 
     for i in range(n):
-        history = candles[: i + 1]
-        if len(history) < strategy.min_history:
+        if i + 1 < strategy.min_history:
             continue
+        history = candles[max(0, i + 1 - window): i + 1]
 
         ctx = EntryContext(
             instrument=instrument, timeframe=strategy.timeframe,

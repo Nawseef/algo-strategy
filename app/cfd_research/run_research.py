@@ -91,6 +91,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--step-days", type=int, default=7)
     p.add_argument("--cost-model", default="intraday", choices=sorted(_COST_MODELS))
     p.add_argument("--top", type=int, default=40, help="How many top slices to print.")
+    p.add_argument("--workers", type=int, default=1,
+                   help="Parallel worker processes (one instrument each). 1 = sequential.")
     # Challenge ruleset.
     p.add_argument("--p1", type=float, default=8.0, help="Phase-1 profit target %%.")
     p.add_argument("--p2", type=float, default=5.0, help="Phase-2 target %% (0 = one-step).")
@@ -98,6 +100,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-dd", type=float, default=10.0)
     p.add_argument("--dd-mode", default="static", choices=("static", "trailing"))
     return p
+
+
+def _replay_one_instrument(payload: dict) -> list:
+    """Worker: load one instrument's candles and replay ORB (all sessions) under
+    the exit sweep. Opens its own DB connection so it's safe in a subprocess."""
+    instrument = payload["instrument"]
+    cost_model = _COST_MODELS[payload["cost_model"]]
+    store = ResearchStore()
+    store.start()
+    try:
+        candles = _load_candles(store, instrument, payload["start_ms"], payload["end_ms"])
+    finally:
+        store.stop()
+    if len(candles) < 100:
+        logger.warning("%s: only %d candles — skipping", instrument, len(candles))
+        return []
+
+    trades: list = []
+    for session in payload["sessions"]:
+        strat = SessionORB(session=session, range_bars=payload["range_bars"],
+                           buffer_frac=payload["buffer_frac"])
+        t = replay_entries(instrument, candles, strat,
+                           risk_pct=payload["risk"], cost_model=cost_model)
+        trades.extend(t)
+        logger.info("%s / %s: %d candles -> %d trades (x exits)",
+                    instrument, session, len(candles), len(t))
+    return trades
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -110,54 +139,52 @@ def main(argv: list[str] | None = None) -> int:
         phase1_target_pct=args.p1, phase2_target_pct=args.p2,
         daily_dd_pct=args.daily_dd, max_dd_pct=args.max_dd, dd_mode=args.dd_mode,
     )
-    cost_model = _COST_MODELS[args.cost_model]
     start_ms, end_ms = _date_to_ms(args.start), _date_to_ms(args.end)
 
-    store = ResearchStore()
-    store.start()
-    try:
-        all_trades = []
-        for instrument in instruments:
-            candles = _load_candles(store, instrument, start_ms, end_ms)
-            if len(candles) < 100:
-                logger.warning("%s: only %d candles — skipping", instrument, len(candles))
-                continue
-            for session in sessions:
-                strat = SessionORB(session=session, range_bars=args.range_bars,
-                                   buffer_frac=args.buffer_frac)
-                trades = replay_entries(
-                    instrument, candles, strat,
-                    risk_pct=args.risk, cost_model=cost_model,
-                )
+    # Each instrument is independent -> replay them in parallel (CPU-bound work,
+    # so real processes). Each worker opens its own DB connection, loads its
+    # instrument's candles, and returns tagged trades; the parent scores.
+    payloads = [
+        {"instrument": inst, "start_ms": start_ms, "end_ms": end_ms,
+         "sessions": sessions, "range_bars": args.range_bars,
+         "buffer_frac": args.buffer_frac, "risk": args.risk,
+         "cost_model": args.cost_model}
+        for inst in instruments
+    ]
+
+    all_trades: list = []
+    if args.workers > 1 and len(payloads) > 1:
+        import multiprocessing as mp
+        with mp.Pool(min(args.workers, len(payloads))) as pool:
+            for trades in pool.imap_unordered(_replay_one_instrument, payloads):
                 all_trades.extend(trades)
-                logger.info("%s / %s: %d candles -> %d trades (x exits)",
-                            instrument, session, len(candles), len(trades))
+    else:
+        for payload in payloads:
+            all_trades.extend(_replay_one_instrument(payload))
 
-        if not all_trades:
-            print("No trades produced. Check instruments/date range/sessions.")
-            return 1
+    if not all_trades:
+        print("No trades produced. Check instruments/date range/sessions.")
+        return 1
 
-        results = score_slices(
-            all_trades, dimensions, rules,
-            ref_risk_pct=args.risk, risk_levels=risk_levels,
-            step_days=args.step_days, min_trades=args.min_trades,
-        )
+    results = score_slices(
+        all_trades, dimensions, rules,
+        ref_risk_pct=args.risk, risk_levels=risk_levels,
+        step_days=args.step_days, min_trades=args.min_trades,
+    )
 
-        print()
-        print("=" * 100)
-        print(f"CFD ORB RESEARCH  {args.start} .. {args.end}")
-        print(f"Instruments: {', '.join(instruments)} | sessions: {', '.join(sessions)} "
-              f"| range={args.range_bars}b")
-        print(f"Rules: P1={args.p1}% P2={args.p2}% dailyDD={args.daily_dd}% maxDD={args.max_dd}% "
-              f"({args.dd_mode}) | cost={args.cost_model}")
-        print(f"Total trades (entries x exits): {len(all_trades):,} | slices scored: {len(results)}")
-        print(f"Sliced by: {', '.join(dimensions)}  (best first)")
-        print("-" * 100)
-        print(format_slices(results, top=args.top))
-        print("=" * 100)
-        return 0
-    finally:
-        store.stop()
+    print()
+    print("=" * 100)
+    print(f"CFD ORB RESEARCH  {args.start} .. {args.end}")
+    print(f"Instruments: {', '.join(instruments)} | sessions: {', '.join(sessions)} "
+          f"| range={args.range_bars}b | workers={args.workers}")
+    print(f"Rules: P1={args.p1}% P2={args.p2}% dailyDD={args.daily_dd}% maxDD={args.max_dd}% "
+          f"({args.dd_mode}) | cost={args.cost_model}")
+    print(f"Total trades (entries x exits): {len(all_trades):,} | slices scored: {len(results)}")
+    print(f"Sliced by: {', '.join(dimensions)}  (best first)")
+    print("-" * 100)
+    print(format_slices(results, top=args.top))
+    print("=" * 100)
+    return 0
 
 
 if __name__ == "__main__":
