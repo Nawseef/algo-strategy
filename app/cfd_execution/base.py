@@ -45,6 +45,8 @@ class ExitReason(Enum):
 
     STOP_LOSS = "STOP_LOSS"
     TAKE_PROFIT = "TAKE_PROFIT"
+    TRAILING_STOP = "TRAILING_STOP"    # Trailing stop hit (may be a profit).
+    TIME_STOP = "TIME_STOP"            # Closed at market after a max holding time.
     MANUAL = "MANUAL"
     EOD_FLATTEN = "EOD_FLATTEN"        # Forced close (weekend / daily reset guard).
     RISK_HALT = "RISK_HALT"            # Closed because a risk limit was breached.

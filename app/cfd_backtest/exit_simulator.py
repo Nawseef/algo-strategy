@@ -60,6 +60,12 @@ class SimulatedTrade:
     bars_held: int
     partials: list[PartialClose] = field(default_factory=list)
     closed: bool = True       # False if never exited within the provided window
+    # ── Research tags (filled by the replay layer; see CFDBacktestReplay) ──
+    session: str = ""         # FX session at entry (london / new_york / overlap / ...)
+    regime: str = ""          # market condition at entry (trend_up / trend_down / range)
+    volatility: str = ""      # volatility bucket at entry (loVol / normalVol / hiVol)
+    exit_model: str = ""      # which exit rule produced this trade
+    timeframe: str = ""       # timeframe the signal came from
 
 
 def synthetic_tick_path(candle: Candle) -> list[float]:
