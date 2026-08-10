@@ -62,6 +62,7 @@ import time
 from datetime import datetime, timezone
 
 from app.broker.base import Instrument, Tick
+from app.broker.ctrader import CTraderBroker, CTraderFeedClient
 from app.broker.mt5 import MT5Broker, MT5FeedClient
 from app.cfd_execution.account import AccountConfig, PropFirmRules
 from app.cfd_execution.base import ExitReason
@@ -133,23 +134,43 @@ class CFDPaperTradingApp:
         self,
         store: ResearchStore | None = None,
         notifier: MT5Notifier | None = None,
+        *,
+        feed: str = "mt5",
     ) -> None:
         # ``store``/``notifier`` are injectable so tests can drive the runner
         # with an in-memory store and no Telegram. Production passes neither.
+        # ``feed`` selects the data source: "mt5" (the interim feed VM) or
+        # "ctrader" (the push Open API). Everything downstream is feed-agnostic.
         self._config = load_config()
+        self._feed_kind = (feed or "mt5").lower().strip()
         self._event_bus = EventBus()
         self._candle_builder = CandleBuilder(self._event_bus, timeframes=[Timeframe.M5])
 
-        # ── Feed (reuse the MT5 bridge; swap to cTrader later without touching
-        # the strategy/executor layers). ──
-        self._broker = MT5Broker(self._config.mt5)
-        self._feed = MT5FeedClient(
-            self._broker,
-            self._config.mt5,
-            is_market_open=forex_hours.is_market_open,
-            seconds_until_open=forex_hours.seconds_until_market_open,
-            on_resume=self._maybe_backfill,
-        )
+        # ── Feed backend. The strategy / executor / notifier / risk layers
+        # below never touch the feed directly, so swapping MT5 <-> cTrader here
+        # is the ONLY difference between the two runners. ──
+        if self._feed_kind == "ctrader":
+            self._feed_cfg = self._config.ctrader
+            self._broker = CTraderBroker(self._config.ctrader)
+            self._feed = CTraderFeedClient(
+                self._broker,
+                self._config.ctrader,
+                is_market_open=forex_hours.is_market_open,
+                seconds_until_open=forex_hours.seconds_until_market_open,
+                # Surface dead-token / lost-subscription / reconnect events to
+                # Telegram (notifier is built just below; resolved at call time).
+                alert_cb=lambda m: self._notifier.send(m),
+            )
+        else:
+            self._feed_cfg = self._config.mt5
+            self._broker = MT5Broker(self._config.mt5)
+            self._feed = MT5FeedClient(
+                self._broker,
+                self._config.mt5,
+                is_market_open=forex_hours.is_market_open,
+                seconds_until_open=forex_hours.seconds_until_market_open,
+                on_resume=self._maybe_backfill,
+            )
         self._startup_backfill_done = False
 
         # ── Storage + alerts (dedicated CFD channel; never the NSE bot). ──
@@ -158,14 +179,14 @@ class CFDPaperTradingApp:
         self._candle_store = LiveCandleStore(self._store) if self._archive_candles else None
         # A rich, multi-account notifier (entry/exit + periodic + EOD + session).
         # Injected notifier is used as-is (tests pass a dummy); otherwise wrap the
-        # dedicated CFD Telegram transport.
+        # dedicated CFD Telegram transport. cTrader reuses the same CFD bot, so
+        # fall back to the MT5_TELEGRAM_* creds when CTRADER_TELEGRAM_* are unset.
         if notifier is not None:
             self._notifier = notifier
         else:
-            transport = MT5Notifier(
-                self._config.mt5.telegram_bot_token,
-                self._config.mt5.telegram_chat_ids,
-            )
+            bot = self._feed_cfg.telegram_bot_token or self._config.mt5.telegram_bot_token
+            chats = self._feed_cfg.telegram_chat_ids or self._config.mt5.telegram_chat_ids
+            transport = MT5Notifier(bot, chats)
             self._notifier = CFDTradeNotifier(transport)
         # Periodic portfolio summary cadence (minutes); 0 disables.
         self._summary_interval_s = max(0.0, _env_float("CFD_PAPER_SUMMARY_MIN", 30.0)) * 60.0
@@ -275,14 +296,24 @@ class CFDPaperTradingApp:
         # static table (catches e.g. silver 5000 vs the broker's real 1000).
         self._sync_instrument_specs()
 
+        symbols = list(self._feed_cfg.symbols)
+        if self._feed_kind == "ctrader":
+            # Only trade symbols that resolved to a cTrader id on connect.
+            resolved = getattr(self._broker, "symbol_map", {})
+            symbols = [s for s in symbols if s in resolved]
         instruments = [
             Instrument(
-                exchange=self._config.mt5.exchange,
-                segment=self._config.mt5.segment,
+                exchange=self._feed_cfg.exchange,
+                segment=self._feed_cfg.segment,
                 exchange_token=sym,
             )
-            for sym in self._config.mt5.symbols
+            for sym in symbols
         ]
+        if not instruments:
+            raise RuntimeError(
+                "No instruments to trade (no symbols resolved). Check the feed "
+                "symbol config."
+            )
 
         def emit_tick(tick: Tick) -> None:
             self._event_bus.emit("tick", tick)
@@ -297,7 +328,7 @@ class CFDPaperTradingApp:
                     self._account.effective_risk_per_trade_pct())
         logger.info("Strategies: %s",
                     ", ".join(s.strategy_id for s in self._strategies) or "(none)")
-        logger.info("Symbols: %s", ", ".join(self._config.mt5.symbols))
+        logger.info("Feed: %s | Symbols: %s", self._feed_kind, ", ".join(symbols))
         logger.info("Archive candles: %s | store: %s",
                     self._archive_candles,
                     "postgres" if self._store.is_postgres else "sqlite")
@@ -352,7 +383,7 @@ class CFDPaperTradingApp:
         # Look back generously (x4) to cover weekend/holiday gaps in bar coverage.
         start_ms = now_ms - needed * interval_ms * 4
 
-        for sym in self._config.mt5.symbols:
+        for sym in self._feed_cfg.symbols:
             rows = self._store.get_live_candles(sym, Timeframe.M5.value, start_ms, now_ms)
             source = "live_candles"
             if len(rows) < needed:
@@ -371,8 +402,8 @@ class CFDPaperTradingApp:
 
     def _row_to_candle(self, symbol: str, row: dict) -> Candle:
         return Candle(
-            exchange=self._config.mt5.exchange,
-            segment=self._config.mt5.segment,
+            exchange=self._feed_cfg.exchange,
+            segment=self._feed_cfg.segment,
             exchange_token=symbol,
             timeframe=Timeframe.M5,
             timestamp_ms=row["timestamp_ms"],
@@ -603,20 +634,29 @@ class CFDPaperTradingApp:
         """
         from app.cfd_risk import instruments as cfd_instruments
 
-        for sym in self._config.mt5.symbols:
+        get_spec = getattr(self._broker, "get_symbol_spec", None)
+        if get_spec is None:
+            return
+
+        for sym in self._feed_cfg.symbols:
             try:
-                spec = self._broker.get_symbol_spec(sym)
+                spec = get_spec(sym)
             except Exception as e:  # noqa: BLE001
                 logger.warning("instrument spec query failed for %s: %s", sym, e)
                 continue
-            if not spec or spec.get("tick_value") is None:
-                continue
-            if not spec.get("contract_size") or not spec.get("tick_size"):
+            if not spec or not spec.get("contract_size"):
                 continue
             try:
-                cfd_instruments.apply_broker_spec(
-                    sym, spec["contract_size"], spec["tick_value"], spec["tick_size"],
-                )
+                if spec.get("tick_value") is not None and spec.get("tick_size"):
+                    # MT5 exposes a currency-converted tick value -> exact.
+                    cfd_instruments.apply_broker_spec(
+                        sym, spec["contract_size"], spec["tick_value"], spec["tick_size"],
+                    )
+                else:
+                    # cTrader gives no tick value; correct the contract size and
+                    # let the USD-per-move values rescale linearly (correct for
+                    # any quote currency). No-op when it already matches.
+                    cfd_instruments.set_contract_size(sym, spec["contract_size"])
             except (KeyError, ValueError) as e:
                 logger.warning("could not apply broker spec for %s: %s", sym, e)
 
@@ -640,6 +680,12 @@ class CFDPaperTradingApp:
         archived candle series (and strategy history) stays gapless across
         consumer downtime.
         """
+        # Backfill is MT5-specific (replays missed ticks from the feed VM's
+        # history). cTrader is push-only with no equivalent, and warmup already
+        # seeds history from stored candles — so it's a no-op for other feeds.
+        if self._feed_kind != "mt5":
+            self._startup_backfill_done = True
+            return
         if self._startup_backfill_done or not self._config.mt5.backfill_enabled:
             return
         if not self._archive_candles:
