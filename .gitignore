@@ -28,5 +28,8 @@ data/*.db-wal
 data/*.sqlite
 data/paper_trades.json
 
+# cTrader rotated OAuth tokens (secrets — never commit)
+data/ctrader_tokens.json
+
 # Dukascopy fetch (background runner pidfile)
 logs/dukascopy_fetch.pid

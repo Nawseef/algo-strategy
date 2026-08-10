@@ -99,6 +99,14 @@ class ManagedPosition:
     max_favorable_price: float = 0.0
     max_adverse_price: float = 0.0
 
+    # Dynamic-exit runtime state. ``current_stop`` starts at the plan's stop and
+    # is moved by the exit policy (breakeven / trailing); ``evaluate_exit`` uses
+    # it, NOT the static plan stop. ``bars_open`` counts completed candles since
+    # entry (for the time-stop). With no exit policy these stay inert and the
+    # behaviour is identical to a fixed SL.
+    current_stop: float = 0.0
+    bars_open: int = 0
+
     # Final close bookkeeping (set when fully closed).
     exit_price: float = 0.0
     exit_time_ms: float = 0.0
@@ -107,6 +115,9 @@ class ManagedPosition:
     def __post_init__(self) -> None:
         self.max_favorable_price = self.entry_price
         self.max_adverse_price = self.entry_price
+        # Managed stop starts at the plan's stop-loss.
+        if self.current_stop <= 0:
+            self.current_stop = self.exit_plan.stop_loss
 
     # ─── Derived ─────────────────────────────────────────────────
 
@@ -183,7 +194,7 @@ def evaluate_exit(pos: ManagedPosition, high: float, low: float) -> list[ExitDec
         return []
 
     decisions: list[ExitDecision] = []
-    sl = pos.exit_plan.stop_loss
+    sl = pos.current_stop     # the managed stop (== plan stop when no policy)
 
     # Did the stop get touched within this range?
     if pos.direction is Direction.LONG:
@@ -239,6 +250,71 @@ def evaluate_exit(pos: ManagedPosition, high: float, low: float) -> list[ExitDec
             break
 
     return decisions
+
+
+def _tighter_stop(sign: int, a: float, b: float) -> float:
+    """Return whichever stop is closer to price in the trade's favour.
+
+    For a LONG (sign +1) a higher stop is tighter; for a SHORT, a lower stop."""
+    return max(a, b) if sign > 0 else min(a, b)
+
+
+def apply_dynamic_stop(pos: ManagedPosition, price: float) -> bool:
+    """
+    Move ``pos.current_stop`` per the exit policy (breakeven + trailing).
+
+    Called on each price update AFTER ``update_excursion``. Ratchets the stop in
+    the trade's favour only (never loosens). Returns True if the stop moved (the
+    live executor uses that to fire a broker amend). No-op — returns False — when
+    there is no policy or nothing dynamic is configured.
+
+    This is the SINGLE source of truth for dynamic stop management: the paper
+    executor applies the resulting stop by re-running ``evaluate_exit``; the
+    cTrader executor mirrors it with an ``AmendPositionRequest``. Same decision,
+    two ways of applying it → paper == live.
+    """
+    policy = pos.exit_plan.exit_policy
+    if policy is None or not policy.is_dynamic():
+        return False
+    R = pos.exit_plan.risk_distance
+    if R <= 0:
+        return False
+
+    sign = pos.direction.sign
+    entry = pos.entry_price
+    old = pos.current_stop
+    new_stop = old
+
+    # Breakeven: once price has run +breakeven_at_r in our favour, pull the stop
+    # up to entry (+ optional locked offset).
+    if policy.breakeven_at_r is not None:
+        favourable_r = (pos.max_favorable_price - entry) * sign / R
+        if favourable_r >= policy.breakeven_at_r - 1e-12:
+            be = entry + sign * policy.breakeven_offset_r * R
+            new_stop = _tighter_stop(sign, new_stop, be)
+
+    # Trailing: keep the stop a fixed distance behind the best price seen.
+    trail_dist = policy.trail_distance
+    if trail_dist is None and policy.trail_r is not None:
+        trail_dist = policy.trail_r * R
+    if trail_dist is not None and trail_dist > 0:
+        trailed = pos.max_favorable_price - sign * trail_dist
+        new_stop = _tighter_stop(sign, new_stop, trailed)
+
+    if (sign > 0 and new_stop > old + 1e-12) or (sign < 0 and new_stop < old - 1e-12):
+        pos.current_stop = new_stop
+        return True
+    return False
+
+
+def time_stop_reached(pos: ManagedPosition) -> bool:
+    """True if the position has been open for at least ``time_stop_bars`` candles."""
+    policy = pos.exit_plan.exit_policy
+    return (
+        policy is not None
+        and policy.time_stop_bars is not None
+        and pos.bars_open >= policy.time_stop_bars
+    )
 
 
 class BaseExecutor(ABC):

@@ -9,9 +9,13 @@ python-dotenv>=1.0.0
 mt5linux>=0.1.9
 rpyc==5.2.3
 
-# cTrader Open API feed (replaces MT5 feed VM — no Wine/Docker/RPyC needed).
-# Asyncio-based, push model, auto-reconnect + token refresh built in.
-ctrader-api-client>=0.2.0
+# cTrader Open API feed + live execution (replaces MT5 feed VM — no Wine/Docker/
+# RPyC needed). Asyncio, push model, auto-reconnect + token refresh built in.
+# Pinned to >=0.8.0: the API surface used by app/broker/ctrader.py (CTraderClient,
+# symbols.get_by_id -> Symbol.lots_to_volume/quantize_price, NewOrderRequest
+# stop_loss/take_profit, ExecutionEvent, TokenStore) was validated live against
+# 0.8.0. Requires Python 3.12+.
+ctrader-api-client>=0.8.0
 
 # Analytics (Phase 7)
 pandas>=2.0.0

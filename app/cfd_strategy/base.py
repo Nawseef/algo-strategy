@@ -80,6 +80,57 @@ class TakeProfit:
 
 
 @dataclass(frozen=True)
+class ExitPolicy:
+    """
+    Optional DYNAMIC exit management layered on top of the static SL + TPs.
+
+    Distances are in R (the entry→stop risk distance) unless an absolute price
+    distance is given. A ``None`` field means that behaviour is off; with every
+    field ``None`` (the default) a position is managed exactly as before —
+    fixed SL + take-profit(s). This is applied IDENTICALLY by the paper executor
+    and the cTrader live executor (which translates it to broker
+    amend-stop / partial-close calls), so paper == live.
+
+    Fields map onto the research exit models:
+      * ``breakeven_at_r``           -> BreakevenAfter1R
+      * ``trail_r`` / ``trail_distance`` -> AtrTrailing / trailing runner
+      * ``time_stop_bars``           -> TimeStop
+      * multi-TP scale-out is expressed by the ExitPlan's take_profits fractions.
+    """
+
+    # Move the stop to breakeven once price reaches +breakeven_at_r R in favour.
+    breakeven_at_r: float | None = None
+    # Where to put the stop when breakeven triggers: entry + offset*R (0 = entry).
+    breakeven_offset_r: float = 0.0
+    # Trail the stop behind the best price. ``trail_distance`` (absolute price)
+    # takes precedence over ``trail_r`` (= trail_r × risk distance). Ratchets in
+    # the trade's favour only — never loosens.
+    trail_r: float | None = None
+    trail_distance: float | None = None
+    # Close the remaining position at market after this many completed candles.
+    time_stop_bars: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.breakeven_at_r is not None and self.breakeven_at_r <= 0:
+            raise ValueError("breakeven_at_r must be > 0")
+        if self.trail_r is not None and self.trail_r <= 0:
+            raise ValueError("trail_r must be > 0")
+        if self.trail_distance is not None and self.trail_distance <= 0:
+            raise ValueError("trail_distance must be > 0")
+        if self.time_stop_bars is not None and self.time_stop_bars < 1:
+            raise ValueError("time_stop_bars must be >= 1")
+
+    def is_dynamic(self) -> bool:
+        """True if any dynamic behaviour is enabled (else it's pure static SL/TP)."""
+        return (
+            self.breakeven_at_r is not None
+            or self.trail_r is not None
+            or self.trail_distance is not None
+            or self.time_stop_bars is not None
+        )
+
+
+@dataclass(frozen=True)
 class ExitPlan:
     """
     The mandatory exit plan attached to every entry.
@@ -102,6 +153,9 @@ class ExitPlan:
     # Optional: a strategy can name/describe the exit model it used (e.g.
     # "atr_2x_sl_rr3", "structure_sl_rr2"). Free-form, for research grouping.
     exit_model: str = ""
+    # Optional dynamic management (breakeven / trailing / time-stop). None =
+    # static SL + TPs (the original behaviour).
+    exit_policy: ExitPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.entry_price <= 0:
@@ -348,6 +402,7 @@ def build_rr_exit_plan(
     close_fractions: list[float] | None = None,
     exit_model: str = "",
     min_rr: float = MIN_RR,
+    exit_policy: "ExitPolicy | None" = None,
 ) -> ExitPlan:
     """
     Build an ExitPlan from a stop-loss and one or more R:R targets.
@@ -412,4 +467,5 @@ def build_rr_exit_plan(
         take_profits=take_profits,
         min_rr=min_rr,
         exit_model=exit_model,
+        exit_policy=exit_policy,
     )

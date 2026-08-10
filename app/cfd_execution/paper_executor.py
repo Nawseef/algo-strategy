@@ -34,7 +34,9 @@ from app.cfd_execution.base import (
     ManagedPosition,
     PartialClose,
     PositionStatus,
+    apply_dynamic_stop,
     evaluate_exit,
+    time_stop_reached,
 )
 from app.cfd_risk.costs import COST_MODEL_INTRADAY, CFDCostModel, calculate_trade_cost
 from app.cfd_risk.instruments import get_instrument
@@ -199,6 +201,9 @@ class PaperExecutor(BaseExecutor):
             if pos.instrument != instrument or not pos.is_open:
                 continue
             pos.update_excursion(price)
+            # Move the managed stop per the exit policy (breakeven / trailing)
+            # before checking exits, so a raised stop can take this same tick.
+            apply_dynamic_stop(pos, price)
             # For a tick, high == low == price.
             decisions = evaluate_exit(pos, high=price, low=price)
             for d in decisions:
@@ -220,6 +225,18 @@ class PaperExecutor(BaseExecutor):
             if arm.candles_remaining <= 0:
                 self._arms.pop(key, None)
                 logger.info("[%s] Arm expired unfilled: %s", self.account_id, key)
+
+        # Advance the bar counter on open positions and honour the time-stop.
+        for pos in list(self._positions.values()):
+            if pos.instrument != instrument or not pos.is_open:
+                continue
+            pos.bars_open += 1
+            if time_stop_reached(pos):
+                price = self._last_price.get(instrument, pos.entry_price)
+                self._apply_exit(
+                    pos, price, pos.remaining_fraction, ExitReason.TIME_STOP,
+                    timestamp_ms, -1,
+                )
 
     def on_day_reset(self, timestamp_ms: float | None = None) -> None:
         """Run the risk guard's daily reset (call at the firm's reset time)."""
