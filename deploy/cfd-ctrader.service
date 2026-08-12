@@ -1,0 +1,29 @@
+[Unit]
+Description=cTrader CFD candle archiver — push feed -> 5m candles -> research_db.live_candles
+# Direct connection to Spotware's cloud (no SSH tunnel / feed VM). Runs IN
+# PARALLEL with mt5-consumer during the validation/soak phase: both write
+# live_candles with ON CONFLICT DO NOTHING, so there are no duplicates and the
+# two feeds gap-fill each other. No Conflicts= line on purpose. When you are
+# confident cTrader is the single source of truth, stop+disable mt5-consumer
+# (and the tunnel) and this becomes the sole live writer.
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/algo-strategy
+# Candle-archiver mode: build + store 5m candles to STAGING TABLE (for comparison
+# against MT5 live_candles before cutover). Once you've validated the feeds match,
+# set CFD_CTRADER_STAGING=false to write directly to live_candles (and retire MT5).
+Environment=PYTHONUNBUFFERED=1
+Environment=CFD_PAPER_STRATEGIES=none
+Environment=CFD_PAPER_ARCHIVE_CANDLES=true
+Environment=CFD_CTRADER_STAGING=true
+ExecStart=/home/ubuntu/algo-strategy/venv/bin/python -m app.main_ctrader
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

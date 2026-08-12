@@ -570,6 +570,18 @@ CREATE TABLE IF NOT EXISTS live_candles (
 CREATE INDEX IF NOT EXISTS idx_live_lookup ON live_candles(instrument, timeframe, timestamp_ms);
 CREATE INDEX IF NOT EXISTS idx_live_date ON live_candles(instrument, session_date);
 
+CREATE TABLE IF NOT EXISTS ctrader_staging_candles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument TEXT NOT NULL, timeframe TEXT NOT NULL,
+    timestamp_ms REAL NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+    volume INTEGER DEFAULT 0, session_date TEXT NOT NULL,
+    session TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(instrument, timeframe, timestamp_ms)
+);
+CREATE INDEX IF NOT EXISTS idx_staging_lookup ON ctrader_staging_candles(instrument, timeframe, timestamp_ms);
+
 CREATE TABLE IF NOT EXISTS cfd_paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     position_id TEXT UNIQUE NOT NULL,
@@ -992,6 +1004,27 @@ class ResearchStore:
                 ON CONFLICT (instrument, timeframe, timestamp_ms) DO NOTHING"""
         else:
             sql = """INSERT OR IGNORE INTO live_candles
+                (instrument, timeframe, timestamp_ms, open, high, low, close, volume, session_date, session)
+                VALUES (?,?,?,?,?,?,?,?,?,?)"""
+        self._execute(sql, (instrument, timeframe, timestamp_ms, o, h, l, c, volume, session_date, session))
+
+    def write_staging_candle(
+        self, instrument: str, timeframe: str, timestamp_ms: float,
+        o: float, h: float, l: float, c: float, volume: int,
+        session_date: str, session: str = "",
+    ) -> None:
+        """Persist a cTrader candle into the staging table (for comparison before cutover).
+
+        Same schema as live_candles; cTrader writes HERE while MT5 writes to live_candles.
+        After validation the staging rows can be promoted/discarded.
+        """
+        if self._use_postgres:
+            sql = """INSERT INTO ctrader_staging_candles
+                (instrument, timeframe, timestamp_ms, open, high, low, close, volume, session_date, session)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (instrument, timeframe, timestamp_ms) DO NOTHING"""
+        else:
+            sql = """INSERT OR IGNORE INTO ctrader_staging_candles
                 (instrument, timeframe, timestamp_ms, open, high, low, close, volume, session_date, session)
                 VALUES (?,?,?,?,?,?,?,?,?,?)"""
         self._execute(sql, (instrument, timeframe, timestamp_ms, o, h, l, c, volume, session_date, session))
