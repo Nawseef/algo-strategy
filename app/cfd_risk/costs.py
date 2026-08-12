@@ -84,6 +84,16 @@ class CFDCostModel:
     # Spread multiplier (1.0 = use typical spread, 1.5 = 50% worse than typical)
     spread_multiplier: float = 1.0
 
+    # Extra spread widening for SESSION-OPEN entries (ORB fires at the open, when
+    # spreads blow out 2-5×). Applied on top of spread_multiplier. 1.0 = off.
+    open_spread_multiplier: float = 1.0
+
+    # If set, slippage is computed from the instrument's native price slippage
+    # (typical_slippage_price × this multiplier), instead of the flat
+    # slippage_pips path. This fixes G5 (flat 0.5 pips is meaningless for
+    # indices). None = use the legacy slippage_pips path.
+    slippage_price_multiplier: float | None = None
+
     # Swap per lot per night in USD (instrument-agnostic average)
     # For intraday: set to 0. For swing: varies by instrument.
     swap_per_night_usd: float = 0.0
@@ -108,6 +118,21 @@ COST_MODEL_CONSERVATIVE = CFDCostModel(
     description="Conservative estimate (1.5× spread, 1 pip slippage, no swap)",
     slippage_pips=1.0,
     spread_multiplier=1.5,
+    swap_per_night_usd=0.0,
+    nights_held=0,
+)
+
+# The realistic model for OPEN-DRIVEN strategies (ORB): spread widened 2× for the
+# session open, and slippage from each instrument's native price slippage (so
+# indices are charged properly). This is the run_research default — an edge that
+# only survives cheaper models is NOT real.
+COST_MODEL_SESSION_OPEN = CFDCostModel(
+    name="session_open",
+    description="Session-open realistic (2× spread at open, per-instrument price slippage)",
+    spread_multiplier=1.0,
+    open_spread_multiplier=2.0,
+    slippage_price_multiplier=1.0,
+    slippage_pips=0.0,
     swap_per_night_usd=0.0,
     nights_held=0,
 )
@@ -154,10 +179,14 @@ def calculate_trade_cost(
     inst = instrument or get_instrument(symbol)
 
     # Apply cost model if provided (individual params override model)
+    open_spread_multiplier = 1.0
+    slippage_price_multiplier: float | None = None
     if cost_model is not None:
         if slippage_pips is None:
             slippage_pips = cost_model.slippage_pips
         spread_multiplier = cost_model.spread_multiplier
+        open_spread_multiplier = cost_model.open_spread_multiplier
+        slippage_price_multiplier = cost_model.slippage_price_multiplier
         swap_per_night_usd = cost_model.swap_per_night_usd
         nights_held = cost_model.nights_held
 
@@ -167,16 +196,24 @@ def calculate_trade_cost(
 
     # ─── Calculate each component ────────────────────────────────
 
-    # Spread: typical_spread × pip_value × lots × multiplier
+    # Spread: typical_spread × pip_value × lots × multiplier × open-widening.
     spread_usd = (
-        inst.typical_spread_pips * inst.pip_value_per_lot * lot_size * spread_multiplier
+        inst.typical_spread_pips * inst.pip_value_per_lot * lot_size
+        * spread_multiplier * open_spread_multiplier
     )
 
     # Commission: per-lot cost × lots (already round-trip in the spec)
     commission_usd = inst.commission_per_lot * lot_size
 
-    # Slippage: slippage_pips × pip_value × lots
-    slippage_usd = slippage_pips * inst.pip_value_per_lot * lot_size
+    # Slippage: prefer the instrument-native PRICE slippage (G5) when the model
+    # opts in; otherwise the legacy flat slippage_pips path.
+    if slippage_price_multiplier is not None:
+        slippage_usd = (
+            inst.typical_slippage_price * inst.point_value_per_lot
+            * lot_size * slippage_price_multiplier
+        )
+    else:
+        slippage_usd = slippage_pips * inst.pip_value_per_lot * lot_size
 
     # Swap: per-night × lots × nights
     swap_usd = swap_per_night_usd * lot_size * nights_held

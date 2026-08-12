@@ -70,10 +70,25 @@ class CFDInstrument:
     contract_size: float            # Units per standard lot (100oz, 100000, 1, etc.)
     pip_value_per_lot: float        # USD per pip per standard lot
     point_value_per_lot: float      # USD per $1 (or 1 point) price move per lot
+    # NOTE (G6): for quote≠USD instruments (USDJPY, EUR-quoted DE40) this is a
+    # STATIC approximation, not a live FX conversion. That's fine for the
+    # backtest: position size = risk/(SL×point_value) and PnL = pnl_price×
+    # point_value×lots, so point_value CANCELS in the risk-normalized % return —
+    # R-multiples, pass-rate and drawdown are unaffected by a wrong point_value.
+    # It only mis-scales the per-lot COMMISSION drag (and commission is $0 for
+    # every index, incl. DE40), so the residual error is negligible. The LIVE
+    # path still reads the exact value from the broker (apply_broker_spec).
 
     # ─── Costs ───────────────────────────────────────────────────
     typical_spread_pips: float      # Average spread in pips (Raw account)
     commission_per_lot: float       # USD per round-trip per standard lot ($7 or $0)
+
+    # Realistic execution slippage in PRICE units (not pips) — instrument-native,
+    # so it's meaningful for indices (where 0.5 "pips" ≈ nothing). This is the
+    # BASE (normal-conditions) slippage; the session-open cost model multiplies
+    # it. Used when a cost model sets slippage_price_multiplier (else the old
+    # flat slippage_pips path applies). See G4/G5 in CFD_BACKTEST_PIPELINE.md.
+    typical_slippage_price: float = 0.0
 
     # ─── Lot Constraints ─────────────────────────────────────────
     min_lot: float = 0.01           # Minimum trade size
@@ -137,6 +152,7 @@ def _register(inst: CFDInstrument) -> None:
 
 _register(CFDInstrument(
     symbol="XAUUSD",
+    typical_slippage_price=0.08,    # ~8 cents base execution slippage
     name="Gold",
     category=InstrumentCategory.METAL,
     pip_size=0.01,
@@ -150,6 +166,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="XAGUSD",
+    typical_slippage_price=0.008,
     name="Silver",
     category=InstrumentCategory.METAL,
     pip_size=0.001,
@@ -178,6 +195,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="EURUSD",
+    typical_slippage_price=0.00003,   # ~0.3 pip
     name="Euro/USD",
     category=InstrumentCategory.FX,
     pip_size=0.0001,
@@ -192,6 +210,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="GBPUSD",
+    typical_slippage_price=0.00005,
     name="Pound/USD",
     category=InstrumentCategory.FX,
     pip_size=0.0001,
@@ -205,6 +224,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="USDJPY",
+    typical_slippage_price=0.005,     # ~0.5 pip
     name="USD/Yen",
     category=InstrumentCategory.FX,
     pip_size=0.01,
@@ -225,6 +245,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="US30",
+    typical_slippage_price=1.5,       # ~1.5 index points
     name="Dow Jones",
     category=InstrumentCategory.INDEX,
     pip_size=1.0,                   # 1 point = 1 pip for indices
@@ -238,6 +259,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="US500",
+    typical_slippage_price=0.3,
     name="S&P 500",
     category=InstrumentCategory.INDEX,
     pip_size=0.1,                   # 0.1 point = 1 pip for S&P
@@ -251,6 +273,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="USTEC",
+    typical_slippage_price=2.0,
     name="Nasdaq 100",
     category=InstrumentCategory.INDEX,
     pip_size=0.1,                   # 0.1 point = 1 pip
@@ -264,6 +287,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="DE40",
+    typical_slippage_price=1.5,
     name="DAX",
     category=InstrumentCategory.INDEX,
     pip_size=0.1,                   # 0.1 point = 1 pip
@@ -279,6 +303,7 @@ _register(CFDInstrument(
 
 _register(CFDInstrument(
     symbol="XTIUSD",
+    typical_slippage_price=0.03,
     name="WTI Crude Oil",
     category=InstrumentCategory.COMMODITY,
     pip_size=0.01,

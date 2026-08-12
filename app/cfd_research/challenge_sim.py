@@ -136,22 +136,39 @@ class MonteCarloResult:
     worst_dd_pcts: list[float] = field(default_factory=list)
 
     # ── rates ──
+    # G9: rates are over DECISIVE runs (excluding INCOMPLETE — a challenge that
+    # ran out of trade history before reaching a verdict is "no decision", not a
+    # fail). Counting incompletes in the denominator unfairly deflated rare
+    # strategies. incomplete_rate is reported separately so it stays visible.
+    @property
+    def decisive_runs(self) -> int:
+        return self.runs - self.incompletes
+
     @property
     def pass_rate(self) -> float:
-        return self.passed / self.runs if self.runs else 0.0
+        d = self.decisive_runs
+        return self.passed / d if d else 0.0
 
     @property
     def phase1_pass_rate(self) -> float:
-        return self.phase1_passed / self.runs if self.runs else 0.0
+        d = self.decisive_runs
+        return self.phase1_passed / d if d else 0.0
 
     @property
     def blowup_rate(self) -> float:
-        """Fraction of runs that breached MAX DD (account-ending)."""
-        return self.failed_max / self.runs if self.runs else 0.0
+        """Fraction of DECISIVE runs that breached MAX DD (account-ending)."""
+        d = self.decisive_runs
+        return self.failed_max / d if d else 0.0
 
     @property
     def daily_halt_rate(self) -> float:
-        return self.failed_daily / self.runs if self.runs else 0.0
+        d = self.decisive_runs
+        return self.failed_daily / d if d else 0.0
+
+    @property
+    def incomplete_rate(self) -> float:
+        """Fraction of start dates that ran out of history before a verdict."""
+        return self.incompletes / self.runs if self.runs else 0.0
 
     @property
     def avg_days_to_pass(self) -> float:
@@ -170,9 +187,10 @@ class MonteCarloResult:
 
     def summary_text(self) -> str:
         return (
-            f"runs={self.runs} pass={self.pass_rate*100:.1f}% "
+            f"runs={self.runs} (decisive={self.decisive_runs}) "
+            f"pass={self.pass_rate*100:.1f}% "
             f"(P1={self.phase1_pass_rate*100:.1f}%) blowup={self.blowup_rate*100:.1f}% "
-            f"dailyHalt={self.daily_halt_rate*100:.1f}% "
+            f"dailyHalt={self.daily_halt_rate*100:.1f}% incomplete={self.incomplete_rate*100:.1f}% "
             f"avgDays={self.avg_days_to_pass:.0f} medDays={self.median_days_to_pass:.0f} "
             f"worstDD={self.worst_dd_pct:.1f}%"
         )
