@@ -45,6 +45,7 @@ def replay_entries(
     atr_period: int = 14,
     max_hold_bars: int = 2000,
     history_window: int = 400,
+    intraday_only: bool = True,
 ) -> list[SimulatedTrade]:
     """Resolve every entry under every exit model; return tagged trades.
 
@@ -82,12 +83,29 @@ def replay_entries(
         if not intents:
             continue
 
+        entry_dt = datetime.fromtimestamp(candles[i].timestamp_ms / 1000, timezone.utc)
         future = candles[i + 1: i + 1 + max_hold_bars]
+
+        # G2 — INTRADAY: flatten by the end of the FX trading day the trade was
+        # opened in (forex_hours.trading_day rolls at 17:00 New York, the broker
+        # rollover). This prevents crediting free overnight/weekend trend moves
+        # to the trailing/runner exits and keeps the strategy genuinely intraday
+        # (no swap charged because nothing is held overnight). Any position still
+        # open at the day boundary is force-flattened at the last in-day close by
+        # the exit model's _flatten (EOD_FLATTEN).
+        if intraday_only:
+            entry_day = forex_hours.trading_day(entry_dt)
+            capped: list[Candle] = []
+            for c in future:
+                c_dt = datetime.fromtimestamp(c.timestamp_ms / 1000, timezone.utc)
+                if forex_hours.trading_day(c_dt) != entry_day:
+                    break
+                capped.append(c)
+            future = capped
         if not future:
             continue
 
         # Entry-context tags (computed once per entry bar, shared by all exits).
-        entry_dt = datetime.fromtimestamp(candles[i].timestamp_ms / 1000, timezone.utc)
         session = forex_hours.session_tag(entry_dt)
         regime = classify_regime(history)
         volatility = classify_volatility(history)
@@ -102,6 +120,7 @@ def replay_entries(
                 )
                 if t is None:
                     continue
+                t.strategy_id = strategy.strategy_id   # clean attribution (G1)
                 t.session = session
                 t.regime = regime
                 t.volatility = volatility

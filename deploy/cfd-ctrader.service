@@ -21,6 +21,9 @@ Environment=PYTHONUNBUFFERED=1
 Environment=CFD_PAPER_STRATEGIES=none
 Environment=CFD_PAPER_ARCHIVE_CANDLES=true
 Environment=CFD_CTRADER_STAGING=true
+Environment=CFD_PAPER_SUMMARY_MIN=0
+Environment=MT5_TELEGRAM_BOT_TOKEN=
+Environment=CTRADER_TELEGRAM_BOT_TOKEN=
 ExecStart=/home/ubuntu/algo-strategy/venv/bin/python -m app.main_ctrader
 Restart=always
 RestartSec=10

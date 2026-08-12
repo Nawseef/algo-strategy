@@ -34,6 +34,7 @@ from app.cfd_research.slice_scorer import format_slices, score_slices
 from app.cfd_risk.costs import (
     COST_MODEL_CONSERVATIVE,
     COST_MODEL_INTRADAY,
+    COST_MODEL_SESSION_OPEN,
     COST_MODEL_ZERO,
 )
 from app.core.models import Candle, Timeframe
@@ -43,6 +44,7 @@ from app.utils.logger import get_logger
 logger = get_logger("cfd_research.run")
 
 _COST_MODELS = {
+    "session_open": COST_MODEL_SESSION_OPEN,
     "intraday": COST_MODEL_INTRADAY,
     "conservative": COST_MODEL_CONSERVATIVE,
     "zero": COST_MODEL_ZERO,
@@ -83,16 +85,35 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Sessions to run ORB on (comma-separated).")
     p.add_argument("--range-bars", type=int, default=6, help="Opening-range length in 5m bars.")
     p.add_argument("--buffer-frac", type=float, default=0.0, help="Breakout buffer as a fraction of range.")
-    p.add_argument("--dimensions", default="instrument,session,exit_model",
-                   help="Slice dimensions (instrument,session,regime,volatility,exit_model,timeframe).")
+    p.add_argument("--dimensions", default="instrument,strategy_id,exit_model",
+                   help="Slice dimensions (instrument,strategy_id,session,regime,volatility,"
+                        "exit_model,timeframe). MUST include exit_model. Use strategy_id (the "
+                        "configured variant, e.g. orb_london_6b) for clean attribution.")
     p.add_argument("--risk", type=float, default=1.0, help="Reference risk %% used to size trades.")
     p.add_argument("--risk-levels", default="0.5,1.0", help="Risk %% levels to score.")
     p.add_argument("--min-trades", type=int, default=30)
     p.add_argument("--step-days", type=int, default=7)
-    p.add_argument("--cost-model", default="intraday", choices=sorted(_COST_MODELS))
+    p.add_argument("--cost-model", default="session_open", choices=sorted(_COST_MODELS),
+                   help="Cost model. Default 'session_open' (widened spread + realistic "
+                        "slippage) because ORB fires at the open. Use 'conservative' or "
+                        "'intraday' to compare; an edge that only survives cheap costs isn't real.")
+    p.add_argument("--allow-overnight", action="store_true",
+                   help="Allow trades to hold past the FX day boundary (NOT intraday; "
+                        "swap is NOT modelled, so results would overstate trend exits).")
     p.add_argument("--top", type=int, default=40, help="How many top slices to print.")
+    p.add_argument("--deployable-only", action="store_true",
+                   help="Only print slices that pass the challenge AND all 4 deployability gates.")
     p.add_argument("--workers", type=int, default=1,
                    help="Parallel worker processes (one instrument each). 1 = sequential.")
+    # Deployability gates (owner's conditions).
+    p.add_argument("--min-trades-month", type=float, default=5.0,
+                   help="Min avg trades/month for a slice (frequency gate).")
+    p.add_argument("--min-active-months", type=int, default=10,
+                   help="Min active months per full year (consistency gate).")
+    p.add_argument("--max-day-conc", type=float, default=0.30,
+                   help="Max share of a month's trades on one day (concentration gate).")
+    p.add_argument("--min-wr", type=float, default=0.40,
+                   help="Min win rate (quality gate; OR positive expectancy).")
     # Challenge ruleset.
     p.add_argument("--p1", type=float, default=8.0, help="Phase-1 profit target %%.")
     p.add_argument("--p2", type=float, default=5.0, help="Phase-2 target %% (0 = one-step).")
@@ -122,7 +143,8 @@ def _replay_one_instrument(payload: dict) -> list:
         strat = SessionORB(session=session, range_bars=payload["range_bars"],
                            buffer_frac=payload["buffer_frac"])
         t = replay_entries(instrument, candles, strat,
-                           risk_pct=payload["risk"], cost_model=cost_model)
+                           risk_pct=payload["risk"], cost_model=cost_model,
+                           intraday_only=payload["intraday_only"])
         trades.extend(t)
         logger.info("%s / %s: %d candles -> %d trades (x exits)",
                     instrument, session, len(candles), len(t))
@@ -148,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         {"instrument": inst, "start_ms": start_ms, "end_ms": end_ms,
          "sessions": sessions, "range_bars": args.range_bars,
          "buffer_frac": args.buffer_frac, "risk": args.risk,
-         "cost_model": args.cost_model}
+         "cost_model": args.cost_model, "intraday_only": not args.allow_overnight}
         for inst in instruments
     ]
 
@@ -170,6 +192,14 @@ def main(argv: list[str] | None = None) -> int:
         all_trades, dimensions, rules,
         ref_risk_pct=args.risk, risk_levels=risk_levels,
         step_days=args.step_days, min_trades=args.min_trades,
+        deploy_kwargs={
+            "min_trades_per_month": args.min_trades_month,
+            "min_active_months_per_year": args.min_active_months,
+            "max_day_concentration": args.max_day_conc,
+            "min_win_rate": args.min_wr,
+            "data_start_ms": start_ms,   # G3: judge consistency over the full window
+            "data_end_ms": end_ms,
+        },
     )
 
     print()
@@ -180,9 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Rules: P1={args.p1}% P2={args.p2}% dailyDD={args.daily_dd}% maxDD={args.max_dd}% "
           f"({args.dd_mode}) | cost={args.cost_model}")
     print(f"Total trades (entries x exits): {len(all_trades):,} | slices scored: {len(results)}")
-    print(f"Sliced by: {', '.join(dimensions)}  (best first)")
+    print(f"Sliced by: {', '.join(dimensions)}  (deployable first, then best pass-rate)")
+    print(f"Deployability gates: >={args.min_trades_month:g}/mo, >={args.min_active_months} active "
+          f"mo/full-yr, <={args.max_day_conc*100:g}% day-conc, WR>={args.min_wr*100:g}% or exp>0")
     print("-" * 100)
-    print(format_slices(results, top=args.top))
+    print(format_slices(results, top=args.top, deployable_only=args.deployable_only))
     print("=" * 100)
     return 0
 

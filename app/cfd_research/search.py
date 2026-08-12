@@ -42,6 +42,10 @@ from app.cfd_research.challenge_sim import (
     from_simulated_trades,
     monte_carlo,
 )
+from app.cfd_research.deployability import (
+    MIN_PORTFOLIO_TRADES_PER_MONTH,
+    portfolio_trades_per_month,
+)
 from app.cfd_research.portfolio_sim import (
     PortfolioConstraints,
     from_strategy_trades,
@@ -139,6 +143,43 @@ def run_search(
     return results, trades_cache
 
 
+@dataclass
+class PortfolioReport:
+    """Portfolio score + the combined-frequency deployability gate."""
+
+    mc: MonteCarloResult
+    trades_per_month: float
+    min_trades_per_month: float
+    n_legs: int
+
+    @property
+    def meets_frequency(self) -> bool:
+        return self.trades_per_month >= self.min_trades_per_month
+
+    @property
+    def deployable(self) -> bool:
+        """Combined account passes convincingly, doesn't blow up, and trades enough."""
+        return self.meets_frequency and self.mc.blowup_rate < 0.05 and self.mc.pass_rate > 0.0
+
+    def summary_text(self) -> str:
+        gate = "OK" if self.meets_frequency else f"LOW (<{self.min_trades_per_month:g})"
+        return (f"legs={self.n_legs} trades/mo={self.trades_per_month:.1f} [{gate}] | "
+                f"{self.mc.summary_text()}")
+
+
+def _portfolio_legs(selected, trades_cache, config, risk_pct):
+    trades_by_source: dict[str, list[SimulatedTrade]] = {}
+    for key in selected:
+        if key not in trades_cache:
+            logger.warning("assemble_portfolio: %s not in trades cache — skipped", key)
+            continue
+        trades_by_source[f"{key[0]}:{key[1]}"] = trades_cache[key]
+    return from_strategy_trades(
+        trades_by_source, config.ref_balance, per_trade_risk_pct=risk_pct,
+        reset_utc_offset_hours=config.reset_utc_offset_hours,
+    )
+
+
 def assemble_portfolio(
     selected: list[tuple[str, str]],
     trades_cache: dict[tuple[str, str], list[SimulatedTrade]],
@@ -154,19 +195,29 @@ def assemble_portfolio(
     contributes its trades under a distinct label so overlaps across combos are
     modelled (the whole point — combined drawdown).
     """
-    trades_by_source: dict[str, list[SimulatedTrade]] = {}
-    for key in selected:
-        if key not in trades_cache:
-            logger.warning("assemble_portfolio: %s not in trades cache — skipped", key)
-            continue
-        trades_by_source[f"{key[0]}:{key[1]}"] = trades_cache[key]
-
-    legs = from_strategy_trades(
-        trades_by_source, config.ref_balance, per_trade_risk_pct=risk_pct,
-        reset_utc_offset_hours=config.reset_utc_offset_hours,
-    )
+    legs = _portfolio_legs(selected, trades_cache, config, risk_pct)
     return monte_carlo_portfolio(
         legs, config.rules, constraints, risk_scale=1.0, step_days=config.step_days
+    )
+
+
+def assemble_portfolio_report(
+    selected: list[tuple[str, str]],
+    trades_cache: dict[tuple[str, str], list[SimulatedTrade]],
+    config: SearchConfig,
+    constraints: PortfolioConstraints,
+    risk_pct: float,
+    min_trades_per_month: float = MIN_PORTFOLIO_TRADES_PER_MONTH,
+) -> PortfolioReport:
+    """Like ``assemble_portfolio`` but also applies the combined >=12 trades/month
+    frequency gate — the portfolio-level deployability condition."""
+    legs = _portfolio_legs(selected, trades_cache, config, risk_pct)
+    mc = monte_carlo_portfolio(
+        legs, config.rules, constraints, risk_scale=1.0, step_days=config.step_days
+    )
+    return PortfolioReport(
+        mc=mc, trades_per_month=portfolio_trades_per_month(legs),
+        min_trades_per_month=min_trades_per_month, n_legs=len(legs),
     )
 
 
