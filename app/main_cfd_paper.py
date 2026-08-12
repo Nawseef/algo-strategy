@@ -176,7 +176,10 @@ class CFDPaperTradingApp:
         # ── Storage + alerts (dedicated CFD channel; never the NSE bot). ──
         self._store = store if store is not None else ResearchStore()
         self._archive_candles = _env_bool("CFD_PAPER_ARCHIVE_CANDLES", True)
-        self._candle_store = LiveCandleStore(self._store) if self._archive_candles else None
+        self._use_staging = _env_bool("CFD_CTRADER_STAGING", self._feed_kind == "ctrader")
+        self._candle_store = LiveCandleStore(
+            self._store, use_staging=self._use_staging
+        ) if self._archive_candles else None
         # A rich, multi-account notifier (entry/exit + periodic + EOD + session).
         # Injected notifier is used as-is (tests pass a dummy); otherwise wrap the
         # dedicated CFD Telegram transport. cTrader reuses the same CFD bot, so
@@ -247,6 +250,12 @@ class CFDPaperTradingApp:
         """Select which registered strategies to run (all, or a filtered set)."""
         registry = get_registry()
         wanted = [s.strip() for s in _env("CFD_PAPER_STRATEGIES", "").split(",") if s.strip()]
+        # Explicit candle-archiver mode: CFD_PAPER_STRATEGIES=none (or "off").
+        # Runs feed -> 5m candles -> live_candles with NO paper trading.
+        if [w.lower() for w in wanted] in (["none"], ["off"]):
+            logger.info("CFD_PAPER_STRATEGIES=%s -> candle-archiver mode (no strategies)",
+                        ",".join(wanted))
+            return []
         if wanted:
             selected: list[CFDStrategy] = []
             for sid in wanted:

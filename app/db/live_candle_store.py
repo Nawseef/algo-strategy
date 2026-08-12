@@ -23,16 +23,20 @@ logger = get_logger(__name__)
 
 
 class LiveCandleStore:
-    """Writes completed candles to research_db.live_candles.
+    """Writes completed candles to research_db.live_candles (or staging).
 
     Each candle is tagged (from its open time) with:
       * session_date = FX trading day (rolls at 17:00 NY, not UTC midnight)
       * session      = active FX session(s), e.g. 'london', 'tokyo+london'
     so session-dependent strategies/research can group and filter directly.
+
+    When ``use_staging=True``, candles go to ``ctrader_staging_candles`` instead
+    (for comparison against the MT5 live_candles before cutover).
     """
 
-    def __init__(self, store: ResearchStore) -> None:
+    def __init__(self, store: ResearchStore, *, use_staging: bool = False) -> None:
         self._store = store
+        self._use_staging = use_staging
         self._stored = 0
 
     def on_candle(self, candle: Candle) -> None:
@@ -42,7 +46,8 @@ class LiveCandleStore:
         session_date = forex_hours.trading_day(open_dt)
         session = forex_hours.session_tag(open_dt)
         try:
-            self._store.write_live_candle(
+            writer = self._store.write_staging_candle if self._use_staging else self._store.write_live_candle
+            writer(
                 instrument=candle.exchange_token,
                 timeframe=candle.timeframe.value,
                 timestamp_ms=candle.timestamp_ms,

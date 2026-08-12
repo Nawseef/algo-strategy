@@ -1,0 +1,7 @@
+[Unit]
+Description=cTrader candle-archiver watchdog — restart a stuck/failed archiver
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/algo-strategy/deploy/cfd-ctrader-watchdog.sh
