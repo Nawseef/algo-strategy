@@ -30,6 +30,13 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# A slice is only DEPLOYABLE if it ALSO survives the prop challenge — not just
+# the activity/quality gates. A strategy that trades often, consistently, and
+# with WR>=40% but still breaches max-DD most of the time is a blow-up machine,
+# not a deployable edge. These are the challenge-survival thresholds.
+MIN_PASS_RATE = 0.60      # must pass the 2-step eval on >=60% of start dates
+MAX_BLOWUP_RATE = 0.05    # must breach MAX DD (account-ending) on <=5% of runs
+
 # The dimensions you can slice by (attributes on SimulatedTrade).
 # ``strategy_id`` (e.g. orb_london_6b) is the CONFIGURED variant — the clean
 # attribution axis. ``session`` is the REAL FX session at entry (can differ from
@@ -63,17 +70,30 @@ class SliceResult:
     mc: MonteCarloResult
     deploy: DeployabilityMetrics | None = None   # frequency/consistency/concentration/quality gates
     has_overlap: bool = False                    # trades overlap in time (single-stream DD understated)
+    min_pass_rate: float = MIN_PASS_RATE         # challenge-survival thresholds (set by score_slices)
+    max_blowup_rate: float = MAX_BLOWUP_RATE
 
     @property
     def sort_key(self) -> tuple:
-        # Deployable slices first, then by pass-rate / blow-up.
-        deployable = 0 if (self.deploy and self.deploy.deployable) else 1
-        return (deployable, -self.mc.pass_rate, self.mc.blowup_rate, -self.mc.phase1_pass_rate)
+        # Fully-qualifying slices first, then by pass-rate / blow-up.
+        return (0 if self.qualifies else 1,
+                -self.mc.pass_rate, self.mc.blowup_rate, -self.mc.phase1_pass_rate)
+
+    @property
+    def passes_challenge(self) -> bool:
+        """Survives the prop challenge: passes often enough AND rarely blows up."""
+        return (self.mc.pass_rate >= self.min_pass_rate
+                and self.mc.blowup_rate <= self.max_blowup_rate)
 
     @property
     def qualifies(self) -> bool:
-        """Passes the challenge convincingly AND all four deployability gates."""
-        return bool(self.deploy and self.deploy.deployable)
+        """DEPLOYABLE = survives the challenge AND passes all four activity/quality gates.
+
+        Both halves are required: the gates alone (frequency/consistency/
+        concentration/quality) do NOT mean the strategy is safe — a slice can
+        pass all four and still breach max-DD on most runs. Deployable means it
+        would actually pass the eval without blowing up."""
+        return bool(self.deploy and self.deploy.deployable and self.passes_challenge)
 
     def label(self) -> str:
         return " ".join(f"{k}={v}" for k, v in self.key.items())
@@ -83,10 +103,11 @@ class SliceResult:
         deploy_cols = ""
         if d is not None:
             actmo = "-" if d.min_full_year_active_months is None else f"{d.min_full_year_active_months:>2d}"
+            chal = "P" if self.passes_challenge else "p"   # challenge survival
             deploy_cols = (
                 f" | t/mo={d.trades_per_month:4.1f} actMo={actmo} "
                 f"dayC={d.worst_month_day_share*100:3.0f}% WR={d.win_rate*100:4.1f}% "
-                f"[{d.flags()}] {'DEPLOY' if d.deployable else '  -   '}"
+                f"[{d.flags()} {chal}] {'DEPLOY' if self.qualifies else '  -   '}"
             )
         overlap_mark = " !OVERLAP" if self.has_overlap else ""
         return (
@@ -110,6 +131,8 @@ def score_slices(
     min_trades: int = 30,
     reset_utc_offset_hours: float = 0.0,
     deploy_kwargs: dict | None = None,
+    min_pass_rate: float = MIN_PASS_RATE,
+    max_blowup_rate: float = MAX_BLOWUP_RATE,
 ) -> list[SliceResult]:
     """Group trades by ``dimensions``, challenge-score each slice at each risk, and
     compute the deployability gates (frequency / consistency / concentration /
@@ -145,7 +168,9 @@ def score_slices(
             scale = level / ref_risk_pct if ref_risk_pct else 1.0
             mc = monte_carlo(returns, rules, risk_scale=scale, step_days=step_days)
             results.append(SliceResult(key=key, trade_count=len(group), risk_pct=level,
-                                       mc=mc, deploy=deploy, has_overlap=overlap))
+                                       mc=mc, deploy=deploy, has_overlap=overlap,
+                                       min_pass_rate=min_pass_rate,
+                                       max_blowup_rate=max_blowup_rate))
 
     n_overlap = len({tuple(r.key.items()) for r in results if r.has_overlap})
     if n_overlap:
@@ -167,9 +192,11 @@ def format_slices(
     if not rows:
         return "(no deployable slices)" if deployable_only else "(no slices with enough trades)"
     n_deploy = sum(1 for r in results if r.qualifies)
+    n_gates = sum(1 for r in results if r.deploy and r.deploy.deployable)
     header = (
         "flags: F=frequency(>=5/mo) C=consistency(>=10 active mo/yr) "
-        "D=dayConc(<=30%) Q=quality(WR>=40% or exp>0); UPPER=pass\n"
-        f"DEPLOYABLE slices (pass challenge + all 4 gates): {n_deploy} of {len(results)}\n"
+        "D=dayConc(<=30%) Q=quality(WR>=40% or exp>0) P=challenge(pass>=60% & blowup<=5%); UPPER=pass\n"
+        f"DEPLOYABLE (survives challenge AND all 4 gates): {n_deploy} of {len(results)}"
+        f"   [passed the 4 gates but NOT the challenge: {n_gates - n_deploy}]\n"
     )
     return header + "\n".join(r.row() for r in rows)

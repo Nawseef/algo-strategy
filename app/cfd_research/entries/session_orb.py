@@ -33,6 +33,7 @@ from app.cfd_research.entry_strategy import EntryContext, EntryStrategy
 from app.cfd_research.exit_models import EntryIntent
 from app.core.models import Timeframe
 from app.cfd_strategy.base import Direction
+from app.strategy.indicators import ema
 from app.utils import forex_hours
 
 
@@ -62,6 +63,7 @@ class SessionORB(EntryStrategy):
         session: str = "london",
         range_bars: int = 6,          # 6 x 5m = first 30 min
         buffer_frac: float = 0.0,     # breakout buffer as a fraction of the range
+        trend_ema: int | None = None,  # only take breakouts aligned with EMA(N); None = off
         allow_long: bool = True,
         allow_short: bool = True,
         instruments: tuple[str, ...] = (),
@@ -70,11 +72,20 @@ class SessionORB(EntryStrategy):
         self.session = session
         self.range_bars = range_bars
         self.buffer_frac = buffer_frac
+        self.trend_ema = trend_ema
         self.allow_long = allow_long
         self.allow_short = allow_short
         self.instruments = instruments
-        self.min_history = range_bars + 1
-        self.strategy_id = f"orb_{session}_{range_bars}b"
+        # Need enough history for both the range and the trend EMA.
+        self.min_history = max(range_bars + 1, (trend_ema or 0) + 1)
+        # strategy_id encodes the params so refined variants are distinctly
+        # attributed (clean slicing) and never collide with the plain ORB.
+        sid = f"orb_{session}_{range_bars}b"
+        if buffer_frac:
+            sid += f"_buf{buffer_frac:g}"
+        if trend_ema:
+            sid += f"_ema{trend_ema}"
+        self.strategy_id = sid
         self._session_fn = session_fn or _default_session_fn
         self._state: dict[str, _ORBState] = {}
 
@@ -125,7 +136,18 @@ class SessionORB(EntryStrategy):
         buf = self.buffer_frac * rng
         close = ctx.close
 
-        if self.allow_long and close > st.range_high + buf:
+        # Optional trend filter: only trade breakouts aligned with the EMA trend
+        # (long only above the EMA, short only below). Causal — uses closes up to
+        # and including the entry bar. If the EMA can't be computed yet, skip.
+        allow_long, allow_short = self.allow_long, self.allow_short
+        if self.trend_ema:
+            trend = ema([c.close for c in ctx.history], self.trend_ema)
+            if trend is None:
+                return []
+            allow_long = allow_long and close > trend
+            allow_short = allow_short and close < trend
+
+        if allow_long and close > st.range_high + buf:
             st.entered = True
             return [EntryIntent(
                 instrument=ctx.instrument, direction=Direction.LONG,
@@ -133,7 +155,7 @@ class SessionORB(EntryStrategy):
                 entry_time_ms=candle.timestamp_ms,
                 reason=f"ORB {self.session} long breakout",
             )]
-        if self.allow_short and close < st.range_low - buf:
+        if allow_short and close < st.range_low - buf:
             st.entered = True
             return [EntryIntent(
                 instrument=ctx.instrument, direction=Direction.SHORT,
