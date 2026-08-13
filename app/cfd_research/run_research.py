@@ -84,7 +84,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sessions", default="london,new_york",
                    help="Sessions to run ORB on (comma-separated).")
     p.add_argument("--range-bars", type=int, default=6, help="Opening-range length in 5m bars.")
-    p.add_argument("--buffer-frac", type=float, default=0.0, help="Breakout buffer as a fraction of range.")
+    p.add_argument("--buffer-frac", type=float, default=0.0,
+                   help="Breakout buffer as a fraction of range (e.g. 0.1 = must clear the "
+                        "range by 10%% of its size; filters marginal breakouts).")
+    p.add_argument("--trend-ema", type=int, default=0,
+                   help="If >0, only take breakouts aligned with the EMA(N) trend on the 5m "
+                        "closes (long above, short below). 0 = off. Filters against-trend entries.")
     p.add_argument("--dimensions", default="instrument,strategy_id,exit_model",
                    help="Slice dimensions (instrument,strategy_id,session,regime,volatility,"
                         "exit_model,timeframe). MUST include exit_model. Use strategy_id (the "
@@ -114,6 +119,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Max share of a month's trades on one day (concentration gate).")
     p.add_argument("--min-wr", type=float, default=0.40,
                    help="Min win rate (quality gate; OR positive expectancy).")
+    # Challenge-survival thresholds (required for a slice to be DEPLOYABLE).
+    p.add_argument("--min-pass-rate", type=float, default=0.60,
+                   help="Min challenge pass-rate for DEPLOYABLE (default 0.60).")
+    p.add_argument("--max-blowup-rate", type=float, default=0.05,
+                   help="Max blow-up (max-DD breach) rate for DEPLOYABLE (default 0.05).")
     # Challenge ruleset.
     p.add_argument("--p1", type=float, default=8.0, help="Phase-1 profit target %%.")
     p.add_argument("--p2", type=float, default=5.0, help="Phase-2 target %% (0 = one-step).")
@@ -141,7 +151,8 @@ def _replay_one_instrument(payload: dict) -> list:
     trades: list = []
     for session in payload["sessions"]:
         strat = SessionORB(session=session, range_bars=payload["range_bars"],
-                           buffer_frac=payload["buffer_frac"])
+                           buffer_frac=payload["buffer_frac"],
+                           trend_ema=payload["trend_ema"] or None)
         t = replay_entries(instrument, candles, strat,
                            risk_pct=payload["risk"], cost_model=cost_model,
                            intraday_only=payload["intraday_only"])
@@ -169,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     payloads = [
         {"instrument": inst, "start_ms": start_ms, "end_ms": end_ms,
          "sessions": sessions, "range_bars": args.range_bars,
-         "buffer_frac": args.buffer_frac, "risk": args.risk,
+         "buffer_frac": args.buffer_frac, "trend_ema": args.trend_ema, "risk": args.risk,
          "cost_model": args.cost_model, "intraday_only": not args.allow_overnight}
         for inst in instruments
     ]
@@ -192,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         all_trades, dimensions, rules,
         ref_risk_pct=args.risk, risk_levels=risk_levels,
         step_days=args.step_days, min_trades=args.min_trades,
+        min_pass_rate=args.min_pass_rate, max_blowup_rate=args.max_blowup_rate,
         deploy_kwargs={
             "min_trades_per_month": args.min_trades_month,
             "min_active_months_per_year": args.min_active_months,
@@ -206,13 +218,16 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 100)
     print(f"CFD ORB RESEARCH  {args.start} .. {args.end}")
     print(f"Instruments: {', '.join(instruments)} | sessions: {', '.join(sessions)} "
-          f"| range={args.range_bars}b | workers={args.workers}")
+          f"| range={args.range_bars}b buffer={args.buffer_frac:g} "
+          f"trendEMA={args.trend_ema or 'off'} | workers={args.workers}")
     print(f"Rules: P1={args.p1}% P2={args.p2}% dailyDD={args.daily_dd}% maxDD={args.max_dd}% "
           f"({args.dd_mode}) | cost={args.cost_model}")
     print(f"Total trades (entries x exits): {len(all_trades):,} | slices scored: {len(results)}")
     print(f"Sliced by: {', '.join(dimensions)}  (deployable first, then best pass-rate)")
     print(f"Deployability gates: >={args.min_trades_month:g}/mo, >={args.min_active_months} active "
           f"mo/full-yr, <={args.max_day_conc*100:g}% day-conc, WR>={args.min_wr*100:g}% or exp>0")
+    print(f"Challenge-survival (for DEPLOYABLE): pass>={args.min_pass_rate*100:g}% and "
+          f"blowup<={args.max_blowup_rate*100:g}%")
     print("-" * 100)
     print(format_slices(results, top=args.top, deployable_only=args.deployable_only))
     print("=" * 100)

@@ -148,6 +148,14 @@ class _OneShotLong(EntryStrategy):
         return []
 
 
+def _candle(base, i, close, hi=None, lo=None):
+    ts = (base.timestamp() + i * 300) * 1000
+    return Candle(exchange="CFD", segment="cfd", exchange_token="XAUUSD",
+                  timeframe=Timeframe.M5, timestamp_ms=ts,
+                  open=close, high=hi if hi is not None else close,
+                  low=lo if lo is not None else close, close=close, volume=1)
+
+
 def _flat_candles(start_dt, n, price=100.0):
     out = []
     for i in range(n):
@@ -179,3 +187,74 @@ def test_g2_intraday_flatten_vs_overnight():
         assert exit_day == entry_day
     # Overnight holds strictly longer (crosses the boundary).
     assert overnight[0].bars_held > intraday[0].bars_held
+
+
+# ─── Label-bug fix: DEPLOYABLE requires surviving the challenge ────
+
+def _good_gates():
+    from app.cfd_research.deployability import DeployabilityMetrics
+    return DeployabilityMetrics(
+        n_trades=300, trades_per_month=21.0, win_rate=0.45, expectancy_usd=5.0,
+        active_months_by_year={}, full_years=[2020], min_full_year_active_months=12,
+        worst_month_day_share=0.1, worst_month="", pass_frequency=True,
+        pass_consistency=True, pass_concentration=True, pass_quality=True,
+    )
+
+
+def test_deployable_requires_passing_the_challenge():
+    from app.cfd_research.slice_scorer import SliceResult
+
+    gates = _good_gates()
+    assert gates.deployable   # all 4 activity/quality gates pass
+
+    # Blow-up machine: passes all 4 gates but breaches max-DD 80% of the time.
+    mc_bad = MonteCarloResult(runs=100, passed=20, failed_max=80, incompletes=0)
+    bad = SliceResult(key={}, trade_count=300, risk_pct=1.0, mc=mc_bad, deploy=gates)
+    assert bad.passes_challenge is False
+    assert bad.qualifies is False        # <-- the fix: NOT deployable despite gates
+
+    # Real winner: gates pass AND passes 75%, blows up 1%.
+    mc_good = MonteCarloResult(runs=100, passed=75, failed_max=1, incompletes=0)
+    good = SliceResult(key={}, trade_count=300, risk_pct=1.0, mc=mc_good, deploy=gates)
+    assert good.passes_challenge is True
+    assert good.qualifies is True
+
+
+# ─── ORB trend filter (refinement) ────────────────────────────────
+
+def test_orb_strategy_id_encodes_params():
+    from app.cfd_research.entries.session_orb import SessionORB
+    assert SessionORB(session="london", range_bars=6).strategy_id == "orb_london_6b"
+    assert SessionORB(session="london", range_bars=6, buffer_frac=0.1,
+                      trend_ema=50).strategy_id == "orb_london_6b_buf0.1_ema50"
+
+
+def test_orb_trend_filter_blocks_against_trend_breakout():
+    from app.cfd_research.entries.session_orb import SessionORB
+
+    base = datetime(2022, 1, 3, 3, 0, tzinfo=timezone.utc)
+    session_start_idx = 60
+    thresh_ms = (base.timestamp() + session_start_idx * 300) * 1000
+    session_fn = lambda dt: {"london"} if dt.timestamp() * 1000 >= thresh_ms else set()
+
+    candles = []
+    for i in range(60):                       # steep downtrend 200 -> ~104
+        px = 200.0 - i * 1.6
+        candles.append(_candle(base, i, px))
+    for i in range(60, 63):                    # tight opening range near 100
+        candles.append(_candle(base, i, 100.5, hi=101.0, lo=100.0))
+    candles.append(_candle(base, 63, 102.0, hi=102.5, lo=100.5))  # up-breakout above 101
+
+    def run(strat):
+        out = []
+        for i in range(len(candles)):
+            ctx = EntryContext(instrument="XAUUSD", timeframe=Timeframe.M5,
+                               candle=candles[i], history=candles[:i + 1])
+            out += strat.entries(ctx)
+        return out
+
+    plain = run(SessionORB(session="london", range_bars=3, session_fn=session_fn))
+    filtered = run(SessionORB(session="london", range_bars=3, trend_ema=50, session_fn=session_fn))
+
+    assert len(plain) == 1 and plain[0].direction is Direction.LONG   # breakout fires
+    assert filtered == []   # EMA50 is far above price (downtrend) -> long blocked
