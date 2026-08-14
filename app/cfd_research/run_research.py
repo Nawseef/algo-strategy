@@ -119,7 +119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--risk-levels", default="0.5,1.0", help="Risk %% levels to score.")
     p.add_argument("--min-trades", type=int, default=30)
     p.add_argument("--step-days", type=int, default=7)
-    p.add_argument("--cost-model", default="session_open", choices=sorted(_COST_MODELS),
+    p.add_argument("--cost-model", default=None, choices=sorted(_COST_MODELS),
                    help="Cost model. Default 'session_open' (widened spread + realistic "
                         "slippage) because ORB fires at the open. Use 'conservative' or "
                         "'intraday' to compare; an edge that only survives cheap costs isn't real.")
@@ -254,14 +254,28 @@ def main(argv: list[str] | None = None) -> int:
             dimensions = dimensions + ("timeframe",)
             logger.info("persisted trades span %d timeframes -> added 'timeframe' to dimensions",
                         len(tfs_in_data))
+        orig_cost = (meta.get("gen") or {}).get("cost_model", "unknown")
+        # Re-cost ONLY if the user explicitly passed --cost-model. Otherwise use
+        # the trades exactly as persisted (no surprise re-costing). Re-costing is
+        # exact (cost is a pure function of instrument+lots+model; the trade path
+        # is cost-independent) — see trade_store.recost_trades + its equivalence test.
+        if args.cost_model is not None and args.cost_model != orig_cost:
+            from app.cfd_research.trade_store import recost_trades
+            recost_trades(all_trades, _COST_MODELS[args.cost_model])
+            cost_note = f"re-costed {orig_cost} -> {args.cost_model}"
+        else:
+            cost_note = f"as-persisted ({orig_cost})"
+        cost_display = cost_note
         print(f"[score-from] loaded {len(all_trades):,} trades from {args.score_from} "
-              f"(ref_balance={ref_balance:g}, ref_risk={ref_risk:g}%)")
+              f"(ref_balance={ref_balance:g}, ref_risk={ref_risk:g}%, cost: {cost_note})")
     else:
         if args.start is None or args.end is None:
             raise SystemExit("--from and --to are required (unless using --score-from)")
         start_ms, end_ms = _date_to_ms(args.start), _date_to_ms(args.end)
         ref_balance, ref_risk = 100_000.0, args.risk
         data_start, data_end = start_ms, end_ms
+        gen_cost = args.cost_model or "session_open"   # default cost for generation
+        cost_display = gen_cost
 
         # Each instrument is independent -> replay them in parallel (CPU-bound
         # work, real processes). Each worker opens its own DB connection, loads
@@ -271,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
              "strategies": strategy_keys,
              "sessions": sessions, "timeframes": timeframes, "range_bars": args.range_bars,
              "buffer_frac": args.buffer_frac, "trend_ema": args.trend_ema, "risk": args.risk,
-             "cost_model": args.cost_model, "intraday_only": not args.allow_overnight}
+             "cost_model": gen_cost, "intraday_only": not args.allow_overnight}
             for inst in instruments
         ]
 
@@ -295,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                             "instruments": instruments, "sessions": sessions,
                             "timeframes": [tf.value for tf in timeframes],
                             "range_bars": args.range_bars, "buffer_frac": args.buffer_frac,
-                            "trend_ema": args.trend_ema, "cost_model": args.cost_model,
+                            "trend_ema": args.trend_ema, "cost_model": gen_cost,
                             "intraday_only": not args.allow_overnight,
                             "from": str(args.start), "to": str(args.end)},
             )
@@ -368,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
               f"| range={args.range_bars}b buffer={args.buffer_frac:g} "
               f"trendEMA={args.trend_ema or 'off'} | workers={args.workers}")
     print(f"Rules: P1={args.p1}% P2={args.p2}% dailyDD={args.daily_dd}% maxDD={args.max_dd}% "
-          f"({args.dd_mode}) | cost={args.cost_model}")
+          f"({args.dd_mode}) | cost={cost_display}")
     print(f"Total trades (entries x exits): {len(all_trades):,} | slices scored: {len(results)}")
     print(f"Sliced by: {', '.join(dimensions)}  (deployable first, then best pass-rate)")
     print(f"Deployability gates: >={args.min_trades_month:g}/mo, >={args.min_active_months} active "

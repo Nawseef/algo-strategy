@@ -117,3 +117,87 @@ def test_bad_schema_raises(tmp_path):
         fh.write('{"_schema": "something_else"}\n')
     with pytest.raises(ValueError):
         load_trades(path)
+
+
+# ─── Re-cost equivalence (the guardrail for --score-from --cost-model) ───────
+
+from app.cfd_research.challenge_sim import from_simulated_trades
+from app.cfd_research.exit_models import (
+    EntryIntent,
+    FixedRR,
+    ScaleRunner,
+    TimeStop,
+    simulate_entry,
+)
+from app.cfd_research.trade_store import recost_trades
+from app.cfd_risk.costs import COST_MODEL_RAW, COST_MODEL_SESSION_OPEN
+from app.core.models import Candle, Timeframe
+
+
+def _cndl(sym, o, h, l, cl):
+    return Candle(exchange="IC", segment="CFD", exchange_token=sym,
+                  timeframe=Timeframe.M5, timestamp_ms=1_500_000_000_000,
+                  open=o, high=h, low=l, close=cl, volume=0)
+
+
+# Long entries that tag their 2R take-profit; different instruments exercise
+# different spread/commission/point-value, and different lots.
+_CASES = [
+    ("XAUUSD", 2000.0, 1990.0, [_cndl("XAUUSD", 2000, 2021, 1999, 2020)]),
+    ("EURUSD", 1.10000, 1.09800, [_cndl("EURUSD", 1.10000, 1.10410, 1.09990, 1.10400)]),
+    ("US30", 40000.0, 39900.0, [_cndl("US30", 40000, 40205, 39990, 40200)]),
+    ("DE40", 18000.0, 17950.0, [_cndl("DE40", 18000, 18105, 17990, 18100)]),
+]
+
+
+def test_recost_equals_fresh_generation():
+    """Re-costing persisted-style trades from RAW to session_open must reproduce
+    EXACTLY what a fresh backtest under session_open books — proving the
+    --score-from --cost-model shortcut can't fabricate a different result."""
+    for model in (FixedRR(2.0), ScaleRunner(2.0, 0.5, 2.0), TimeStop(2.0, 24)):
+        for sym, entry, stop, fut in _CASES:
+            intent = EntryIntent(instrument=sym, direction=Direction.LONG,
+                                 entry_price=entry, stop_loss=stop,
+                                 entry_time_ms=1_500_000_000_000)
+            t_raw = simulate_entry(intent, fut, model, risk_pct=1.0,
+                                   ref_balance=100_000.0, cost_model=COST_MODEL_RAW)
+            t_fresh = simulate_entry(intent, fut, model, risk_pct=1.0,
+                                     ref_balance=100_000.0, cost_model=COST_MODEL_SESSION_OPEN)
+            assert t_raw is not None and t_fresh is not None
+
+            # The trade PATH is cost-independent: same lots, gross PnL, MAE.
+            assert t_raw.lots == t_fresh.lots
+            assert t_raw.pnl_usd == pytest.approx(t_fresh.pnl_usd)
+            assert t_raw.mae_price == pytest.approx(t_fresh.mae_price)
+
+            # Re-cost RAW -> session_open must match the freshly-generated one.
+            recost_trades([t_raw], COST_MODEL_SESSION_OPEN)
+            assert t_raw.cost_usd == pytest.approx(t_fresh.cost_usd), f"{sym}/{model.name} cost"
+            assert t_raw.net_pnl_usd == pytest.approx(t_fresh.net_pnl_usd), f"{sym}/{model.name} net"
+
+            # And the scored return stream (ret% + MAE%) matches exactly.
+            r_recost = from_simulated_trades([t_raw], 100_000.0)[0]
+            r_fresh = from_simulated_trades([t_fresh], 100_000.0)[0]
+            assert r_recost.ret_pct == pytest.approx(r_fresh.ret_pct)
+            assert r_recost.mae_ret_pct == pytest.approx(r_fresh.mae_ret_pct)
+
+
+def test_recost_survives_persist_round_trip(tmp_path):
+    """Generate under RAW, persist, load, re-cost to session_open -> matches fresh."""
+    trades_raw, trades_fresh = [], []
+    for sym, entry, stop, fut in _CASES:
+        intent = EntryIntent(instrument=sym, direction=Direction.LONG,
+                             entry_price=entry, stop_loss=stop, entry_time_ms=1_500_000_000_000)
+        trades_raw.append(simulate_entry(intent, fut, FixedRR(2.0), risk_pct=1.0,
+                                         ref_balance=100_000.0, cost_model=COST_MODEL_RAW))
+        trades_fresh.append(simulate_entry(intent, fut, FixedRR(2.0), risk_pct=1.0,
+                                           ref_balance=100_000.0, cost_model=COST_MODEL_SESSION_OPEN))
+
+    path = str(tmp_path / "raw.jsonl.gz")
+    save_trades(path, trades_raw, ref_balance=100_000.0, ref_risk_pct=1.0)
+    loaded, _ = load_trades(path)
+    recost_trades(loaded, COST_MODEL_SESSION_OPEN)
+
+    for lt, ft in zip(loaded, trades_fresh):
+        assert lt.cost_usd == pytest.approx(ft.cost_usd)
+        assert lt.net_pnl_usd == pytest.approx(ft.net_pnl_usd)

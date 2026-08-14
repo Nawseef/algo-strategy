@@ -39,6 +39,8 @@ from typing import IO
 
 from app.cfd_backtest.exit_simulator import SimulatedTrade
 from app.cfd_execution.base import ExitReason
+from app.cfd_risk.costs import CFDCostModel, calculate_trade_cost
+from app.cfd_risk.instruments import get_instrument
 from app.cfd_strategy.base import Direction
 from app.utils.logger import get_logger
 
@@ -159,3 +161,34 @@ def load_trades(path: str) -> tuple[list[SimulatedTrade], dict]:
     logger.info("loaded %d trades <- %s (ref_balance=%s, ref_risk=%s%%)",
                 len(trades), path, meta.get("ref_balance"), meta.get("ref_risk_pct"))
     return trades, meta
+
+
+def recost_trades(trades: list[SimulatedTrade], cost_model: CFDCostModel) -> list[SimulatedTrade]:
+    """Re-apply a DIFFERENT cost model to already-generated trades, IN PLACE.
+
+    This is exact — NOT an approximation — because cost never affects the trade
+    path or sizing:
+      * lot size is a function of (risk%, stop distance) only, not cost;
+      * the exit models trigger on PRICE levels / time, never on cost, so the
+        entry, exit, MAE/MFE and gross PnL are identical under any cost model;
+      * cost is a pure function of (instrument, lots, model) applied at the end.
+
+    So re-costing = recompute the per-trade fee from the persisted GROSS PnL
+    (``pnl_usd``, which is cost-free) and the stored lots/instrument, then
+    re-derive net. This reproduces exactly what a fresh backtest with that cost
+    model would have booked. The equivalence is pinned by a test
+    (``tests/test_trade_store.py::test_recost_equals_fresh_generation``); if that
+    test ever fails, this shortcut is NOT valid and you must re-run instead.
+
+    Only ``cost_usd`` and ``net_pnl_usd`` change; ``pnl_usd`` (gross),
+    ``mae_price``, ``realized_rr`` etc. are cost-independent and untouched. The
+    scorer's MAE %, which adds ``cost_usd``, therefore updates correctly.
+    """
+    for t in trades:
+        inst = get_instrument(t.instrument)
+        cost = calculate_trade_cost(symbol=t.instrument, lot_size=t.lots,
+                                    cost_model=cost_model, instrument=inst)
+        t.cost_usd = cost.total_usd
+        t.net_pnl_usd = t.pnl_usd - cost.total_usd
+    logger.info("re-costed %d trades under cost model '%s'", len(trades), cost_model.name)
+    return trades
