@@ -144,3 +144,45 @@ def test_score_slices_min_trades_filter_and_bad_dimension():
     assert score_slices(few, ("exit_model",), ChallengeRules(), min_trades=30) == []
     with pytest.raises(ValueError):
         score_slices(few, ("not_a_dim",), ChallengeRules())
+
+
+# ─── Gate-first challenge short-circuit ──────────────────────────────────────
+
+
+def _flat_trade(k, model, pnl, tf="5m"):
+    t0 = 1_500_000_000_000
+    return SimulatedTrade(
+        instrument="DE40", direction=Direction.LONG,
+        entry_price=100.0, entry_time_ms=t0 + k * 3_600_000,
+        exit_price=101.0, exit_time_ms=t0 + k * 3_600_000 + 300_000,
+        exit_reason=ExitReason.TAKE_PROFIT, lots=1.0, planned_rr=2.0, realized_rr=1.0,
+        pnl_price=1.0, pnl_usd=pnl, cost_usd=0.0, net_pnl_usd=pnl,
+        mfe_price=1.0, mae_price=1.0, bars_held=1,
+        strategy_id="s", exit_model=model, timeframe=tf,
+    )
+
+
+def test_challenge_gated_only_skips_gate_failers():
+    # Two exit_model groups: one all-winners (passes the quality gate), one
+    # all-losers (fails quality). Gates other than quality are relaxed so the
+    # only discriminator is Q.
+    trades = []
+    for k in range(40):
+        if k % 2 == 0:
+            trades.append(_flat_trade(k, "fixed_rr2", pnl=50.0))       # winners
+        else:
+            trades.append(_flat_trade(k, "breakeven1R_rr2", pnl=-50.0))  # losers
+    rules = ChallengeRules()
+    dk = dict(min_trades_per_month=0.0, min_active_months_per_year=0,
+              max_day_concentration=1.0, min_win_rate=0.4)
+    dims = ("instrument", "exit_model")
+
+    full = score_slices(trades, dims, rules, risk_levels=(1.0,), min_trades=5, deploy_kwargs=dk)
+    gated = score_slices(trades, dims, rules, risk_levels=(1.0,), min_trades=5,
+                         deploy_kwargs=dk, challenge_gated_only=True)
+
+    # Default: BOTH groups are scored (gate-failer still shown for diagnostics).
+    assert {r.key["exit_model"] for r in full} == {"fixed_rr2", "breakeven1R_rr2"}
+    # Gated: only the gate-passing (winners) group survives the short-circuit.
+    assert {r.key["exit_model"] for r in gated} == {"fixed_rr2"}
+    assert all(r.deploy.deployable for r in gated)

@@ -24,6 +24,7 @@ from app.cfd_backtest.exit_simulator import SimulatedTrade
 from app.cfd_research.entry_strategy import EntryContext, EntryStrategy
 from app.cfd_research.exit_models import ExitModel, default_exit_models, simulate_entry
 from app.cfd_research.regime import classify_regime, classify_volatility
+from app.cfd_research.timeframe import aggregate_with_index
 from app.cfd_risk.costs import COST_MODEL_INTRADAY, CFDCostModel
 from app.core.models import Candle
 from app.strategy.indicators import atr
@@ -60,20 +61,27 @@ def replay_entries(
         return []
     models = exit_models or default_exit_models()
     cost_model = cost_model or COST_MODEL_INTRADAY
+    # MULTI-TIMEFRAME: the strategy runs on its declared timeframe. We only store
+    # 5m, so aggregate the base series up to the strategy's timeframe (identity if
+    # it IS 5m, so the base path is unchanged). ``last_base_idx[i]`` is the index
+    # of the last 5m bar composing HTF bar i — exits resolve on the 5m bars AFTER
+    # it, so the signal bar's own sub-bars never leak in and stops keep 5m fidelity.
+    htf_candles, last_base_idx = aggregate_with_index(candles, strategy.timeframe)
+
     window = max(history_window, strategy.min_history)
 
     trades: list[SimulatedTrade] = []
     tf = strategy.timeframe.value
-    n = len(candles)
+    n = len(htf_candles)
 
     for i in range(n):
         if i + 1 < strategy.min_history:
             continue
-        history = candles[max(0, i + 1 - window): i + 1]
+        history = htf_candles[max(0, i + 1 - window): i + 1]
 
         ctx = EntryContext(
             instrument=instrument, timeframe=strategy.timeframe,
-            candle=candles[i], history=history,
+            candle=htf_candles[i], history=history,
         )
         try:
             intents = strategy.entries(ctx)
@@ -83,8 +91,11 @@ def replay_entries(
         if not intents:
             continue
 
-        entry_dt = datetime.fromtimestamp(candles[i].timestamp_ms / 1000, timezone.utc)
-        future = candles[i + 1: i + 1 + max_hold_bars]
+        entry_dt = datetime.fromtimestamp(htf_candles[i].timestamp_ms / 1000, timezone.utc)
+        # Exit management runs on the BASE (5m) bars that come strictly after this
+        # HTF bar has closed (its last constituent 5m bar is last_base_idx[i]).
+        fut_start = last_base_idx[i] + 1
+        future = candles[fut_start: fut_start + max_hold_bars]
 
         # G2 — INTRADAY: flatten by the end of the FX trading day the trade was
         # opened in (forex_hours.trading_day rolls at 17:00 New York, the broker

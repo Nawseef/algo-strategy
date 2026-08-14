@@ -84,6 +84,12 @@ class CFDCostModel:
     # Spread multiplier (1.0 = use typical spread, 1.5 = 50% worse than typical)
     spread_multiplier: float = 1.0
 
+    # Commission multiplier (1.0 = charge the instrument's normal commission,
+    # 0.0 = no commission). Lets a truly cost-free model zero commission too —
+    # COST_MODEL_ZERO keeps commission for historical reasons; COST_MODEL_RAW
+    # sets this to 0 for genuine raw PnL.
+    commission_multiplier: float = 1.0
+
     # Extra spread widening for SESSION-OPEN entries (ORB fires at the open, when
     # spreads blow out 2-5×). Applied on top of spread_multiplier. 1.0 = off.
     open_spread_multiplier: float = 1.0
@@ -139,9 +145,21 @@ COST_MODEL_SESSION_OPEN = CFDCostModel(
 
 COST_MODEL_ZERO = CFDCostModel(
     name="zero",
-    description="No costs (raw PnL)",
+    description="No spread/slippage/swap, but STILL charges instrument commission",
     slippage_pips=0.0,
     spread_multiplier=0.0,
+    swap_per_night_usd=0.0,
+    nights_held=0,
+)
+
+# True cost-off: raw PnL with NOTHING charged (spread, slippage, swap AND
+# commission all zero). Use to see a strategy's raw edge with costs turned off.
+COST_MODEL_RAW = CFDCostModel(
+    name="raw",
+    description="Truly no costs (raw PnL — no spread, slippage, swap, or commission)",
+    slippage_pips=0.0,
+    spread_multiplier=0.0,
+    commission_multiplier=0.0,
     swap_per_night_usd=0.0,
     nights_held=0,
 )
@@ -181,12 +199,14 @@ def calculate_trade_cost(
     # Apply cost model if provided (individual params override model)
     open_spread_multiplier = 1.0
     slippage_price_multiplier: float | None = None
+    commission_multiplier = 1.0
     if cost_model is not None:
         if slippage_pips is None:
             slippage_pips = cost_model.slippage_pips
         spread_multiplier = cost_model.spread_multiplier
         open_spread_multiplier = cost_model.open_spread_multiplier
         slippage_price_multiplier = cost_model.slippage_price_multiplier
+        commission_multiplier = cost_model.commission_multiplier
         swap_per_night_usd = cost_model.swap_per_night_usd
         nights_held = cost_model.nights_held
 
@@ -203,7 +223,7 @@ def calculate_trade_cost(
     )
 
     # Commission: per-lot cost × lots (already round-trip in the spec)
-    commission_usd = inst.commission_per_lot * lot_size
+    commission_usd = inst.commission_per_lot * lot_size * commission_multiplier
 
     # Slippage: prefer the instrument-native PRICE slippage (G5) when the model
     # opts in; otherwise the legacy flat slippage_pips path.

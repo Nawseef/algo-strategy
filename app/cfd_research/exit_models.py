@@ -330,6 +330,19 @@ def simulate_entry(
     )
     net_pnl_usd = pnl_usd - cost.total_usd
 
+    # MAE cap (money-safe correctness fix): the max adverse excursion cannot
+    # exceed the stop distance R while the position is open — once price reaches
+    # the stop you are FLAT (realized at the stop), so a single bar that spikes
+    # past the stop must not be recorded as a floating loss you "held". Every
+    # exit model starts its stop at R and only moves it favourably (breakeven /
+    # trail tighter), so adverse-from-entry is bounded by R for all of them; the
+    # cap therefore also handles the scale/breakeven models (their worst dip is
+    # pre-move, at full size, <= R). Without this, ~30-42% of trades recorded
+    # MAE > risk% and inflated the drawdown/blow-up. NOTE: this assumes the stop
+    # fills AT its level (no gap slippage) — consistent with how realized PnL is
+    # already booked; true gap realism would add adverse stop slippage to BOTH.
+    mae_price = min(abs(outcome.max_adv_price - entry), R)
+
     partials = [
         PartialClose(
             price=price, fraction=frac, reason=reason,
@@ -355,7 +368,7 @@ def simulate_entry(
         cost_usd=cost.total_usd,
         net_pnl_usd=net_pnl_usd,
         mfe_price=abs(outcome.max_fav_price - entry),
-        mae_price=abs(outcome.max_adv_price - entry),
+        mae_price=mae_price,
         bars_held=outcome.bars_held,
         partials=partials,
         closed=outcome.closed,

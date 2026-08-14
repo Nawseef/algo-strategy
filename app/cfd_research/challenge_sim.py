@@ -238,6 +238,22 @@ def from_simulated_trades(
     return out
 
 
+def _has_overlap(returns: list[TradeReturn]) -> bool:
+    """True if any two trades in the stream are open at the same time.
+
+    When trades overlap, the sequential phase sim (one position at a time) would
+    UNDERSTATE drawdown — two simultaneously-adverse trades stack. Detecting this
+    routes the slice through the concurrency-aware phase sim instead.
+    """
+    ordered = sorted(returns, key=lambda r: r.entry_ms)
+    max_exit = float("-inf")
+    for r in ordered:
+        if r.entry_ms < max_exit - 1e-6:
+            return True
+        max_exit = max(max_exit, r.exit_ms)
+    return False
+
+
 # ─── Phase / challenge simulation ────────────────────────────────────────────
 
 
@@ -315,21 +331,123 @@ def simulate_phase(
     return PhaseResult(Outcome.INCOMPLETE, equity, len(trading_days), n - start_index, worst_dd, n)
 
 
+# Event kinds for the concurrency-aware walk (OPEN sorts before CLOSE at an equal
+# timestamp, so a bar that opens one trade as another closes counts both — the
+# conservative choice).
+_OPEN, _CLOSE = 0, 1
+
+
+def simulate_phase_concurrent(
+    returns: list[TradeReturn],
+    start_index: int,
+    rules: ChallengeRules,
+    target_pct: float,
+    risk_scale: float = 1.0,
+) -> PhaseResult:
+    """Concurrency-aware phase sim (for slices whose trades OVERLAP in time).
+
+    Identical rules to ``simulate_phase`` (targets, daily/max DD, money-safe check
+    BEFORE booking), but the floating drawdown at any instant stacks the max
+    adverse excursion of EVERY currently-open trade — so two simultaneously-
+    adverse trades produce a combined dip (the honest worst case), instead of the
+    sequential sim's one-at-a-time understatement.
+
+    Realized PnL of each trade is unchanged (concurrency doesn't change a trade's
+    own result), so the equity/target progression matches the sequential sim on
+    non-overlapping input; only the floating-DD magnitude differs when trades
+    actually overlap.
+    """
+    n = len(returns)
+    if start_index >= n:
+        return PhaseResult(Outcome.INCOMPLETE, 0.0, 0, 0, 0.0, start_index)
+
+    trades = returns[start_index:]
+    start_ms = trades[0].entry_ms
+
+    # Build OPEN/CLOSE events; OPEN before CLOSE at equal time (max concurrency).
+    events: list[tuple[float, int, int]] = []
+    for k, t in enumerate(trades):
+        events.append((t.entry_ms, _OPEN, k))
+        events.append((t.exit_ms, _CLOSE, k))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    realized = 0.0
+    peak = 0.0
+    worst_dd = 0.0
+    day: date | None = None
+    sod_equity = 0.0
+    trading_days: set[date] = set()
+    open_mae: dict[int, float] = {}      # k -> mae%(scaled) of currently-open trades
+    booked = 0
+    last_booked_k = -1
+
+    def _breach(low: float) -> Outcome | None:
+        max_floor = (peak - rules.max_dd_pct) if rules.dd_mode == "trailing" else -rules.max_dd_pct
+        if low <= max_floor + 1e-9:
+            return Outcome.FAIL_MAX_DD
+        if low <= (sod_equity - rules.daily_dd_pct) + 1e-9:
+            return Outcome.FAIL_DAILY_DD
+        return None
+
+    for t_ms, kind, k in events:
+        tr = trades[k]
+
+        if rules.max_calendar_days is not None:
+            if (t_ms - start_ms) / 86_400_000 > rules.max_calendar_days:
+                return PhaseResult(Outcome.TIMEOUT, realized, len(trading_days),
+                                   booked, worst_dd, start_index + last_booked_k + 1)
+
+        # New firm-local day (by event time) -> reset the daily baseline.
+        ev_day = _trading_day(t_ms, rules.reset_utc_offset_hours)
+        if ev_day != day:
+            day = ev_day
+            sod_equity = realized
+
+        if kind == _OPEN:
+            trading_days.add(tr.trading_day)
+            open_mae[k] = tr.mae_ret_pct * risk_scale
+        # Worst-case simultaneous floating equity: all open trades at their MAE.
+        low = realized - sum(open_mae.values())
+        worst_dd = max(worst_dd, -low if low < 0 else 0.0)
+        breach = _breach(low)
+        if breach is not None:
+            return PhaseResult(breach, low, len(trading_days),
+                               booked + 1, worst_dd, start_index + last_booked_k + 1)
+
+        if kind == _CLOSE:
+            realized += tr.ret_pct * risk_scale
+            peak = max(peak, realized)
+            open_mae.pop(k, None)
+            booked += 1
+            last_booked_k = max(last_booked_k, k)
+            if realized >= target_pct - 1e-9 and len(trading_days) >= rules.min_trading_days:
+                return PhaseResult(Outcome.PASS, realized, len(trading_days),
+                                   booked, worst_dd, start_index + last_booked_k + 1)
+
+    return PhaseResult(Outcome.INCOMPLETE, realized, len(trading_days), booked, worst_dd, n)
+
+
 def simulate_challenge(
     returns: list[TradeReturn],
     start_index: int,
     rules: ChallengeRules,
     risk_scale: float = 1.0,
+    concurrent: bool = False,
 ) -> ChallengeResult:
-    """Run Phase 1, then (if it passed and phase2_target_pct > 0) Phase 2."""
+    """Run Phase 1, then (if it passed and phase2_target_pct > 0) Phase 2.
+
+    ``concurrent`` selects the concurrency-aware phase sim (for slices with
+    overlapping trades); default False keeps the proven sequential path.
+    """
+    phase_fn = simulate_phase_concurrent if concurrent else simulate_phase
     start_ms = returns[start_index].entry_ms if start_index < len(returns) else 0.0
-    p1 = simulate_phase(returns, start_index, rules, rules.phase1_target_pct, risk_scale)
+    p1 = phase_fn(returns, start_index, rules, rules.phase1_target_pct, risk_scale)
 
     if not p1.passed or rules.phase2_target_pct <= 0:
         outcome = p1.outcome if not p1.passed else Outcome.PASS
         return ChallengeResult(outcome, p1, None, p1.trading_days, start_ms)
 
-    p2 = simulate_phase(returns, p1.next_index, rules, rules.phase2_target_pct, risk_scale)
+    p2 = phase_fn(returns, p1.next_index, rules, rules.phase2_target_pct, risk_scale)
     outcome = Outcome.PASS if p2.passed else p2.outcome
     return ChallengeResult(outcome, p1, p2, p1.trading_days + p2.trading_days, start_ms)
 
@@ -342,15 +460,24 @@ def monte_carlo(
     rules: ChallengeRules,
     risk_scale: float = 1.0,
     step_days: int = 7,
+    concurrent: bool | None = None,
 ) -> MonteCarloResult:
     """
     Start a fresh challenge every ``step_days`` calendar days across the whole
     trade history and aggregate the outcomes. This is the robustness metric:
     pass rate, blow-up rate, days-to-pass and worst DD across all market regimes.
+
+    ``concurrent``: model overlapping trades' drawdown as worst-case simultaneous
+    (stacked MAE). ``None`` = auto: on if the slice actually has time-overlapping
+    trades, off otherwise (so a clean one-at-a-time slice keeps the proven
+    sequential path and identical numbers).
     """
     res = MonteCarloResult()
     if not returns:
         return res
+
+    if concurrent is None:
+        concurrent = _has_overlap(returns)
 
     # Map each start date (every step_days) to the first trade index on/after it.
     first_day = _dt(returns[0].entry_ms)
@@ -367,7 +494,7 @@ def monte_carlo(
             break
         if j not in seen_indices:
             seen_indices.add(j)
-            cr = simulate_challenge(returns, j, rules, risk_scale)
+            cr = simulate_challenge(returns, j, rules, risk_scale, concurrent=concurrent)
             _tally(res, cr)
         cur += timedelta(days=step_days)
 

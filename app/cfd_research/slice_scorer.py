@@ -48,11 +48,12 @@ TAG_DIMENSIONS = ("instrument", "strategy_id", "session", "regime", "volatility"
 def _slice_has_overlap(trades: list[SimulatedTrade]) -> bool:
     """True if any two trades in the slice are open at the same time.
 
-    The single-stream challenge sim processes trades sequentially and can't model
-    two positions open at once, so it UNDERSTATES the combined floating drawdown
-    of a slice that contains overlapping trades (G8). With clean per-variant
-    slicing (strategy_id) and one-entry-per-session strategies this should be
-    empty — this is a safety net that flags when it isn't."""
+    Such slices are now scored with the CONCURRENCY-AWARE challenge sim (the
+    challenge auto-detects overlap and stacks the worst-case simultaneous MAE of
+    all open trades), so their drawdown is modelled conservatively rather than
+    understated. The ``!OVERLAP`` marker is kept as INFORMATION — it tells you
+    the slice held multiple positions at once (expected for fire-anytime
+    strategies; never for one-entry-per-session ORB)."""
     ordered = sorted(trades, key=lambda t: t.entry_time_ms)
     max_exit = float("-inf")
     for t in ordered:
@@ -133,10 +134,18 @@ def score_slices(
     deploy_kwargs: dict | None = None,
     min_pass_rate: float = MIN_PASS_RATE,
     max_blowup_rate: float = MAX_BLOWUP_RATE,
+    challenge_gated_only: bool = False,
 ) -> list[SliceResult]:
     """Group trades by ``dimensions``, challenge-score each slice at each risk, and
     compute the deployability gates (frequency / consistency / concentration /
-    quality) per slice."""
+    quality) per slice.
+
+    ``challenge_gated_only``: skip the (expensive) challenge Monte-Carlo for slices
+    that FAIL the deployability gates. A gate-failing slice can never be DEPLOYABLE
+    (deployable = gates AND challenge), so its challenge run is wasted work. Default
+    off (every slice is challenged, so gate-failers still show their pass-rate for
+    diagnostics); turn it on for large sweeps (e.g. TF x regime x volatility, ~10k
+    slices) where you only care about the survivors and want it fast."""
     for d in dimensions:
         if d not in TAG_DIMENSIONS:
             raise ValueError(f"unknown slice dimension {d!r}; valid: {TAG_DIMENSIONS}")
@@ -160,8 +169,12 @@ def score_slices(
     for key_vals, group in groups.items():
         if len(group) < min_trades:
             continue
-        returns = from_simulated_trades(group, ref_balance, reset_utc_offset_hours)
         deploy = compute_deployability(group, **deploy_kwargs)
+        # Gate-first: a slice that fails the activity/quality gates can never be
+        # DEPLOYABLE, so skip the expensive challenge Monte-Carlo for it entirely.
+        if challenge_gated_only and not deploy.deployable:
+            continue
+        returns = from_simulated_trades(group, ref_balance, reset_utc_offset_hours)
         overlap = _slice_has_overlap(group)
         key = {d: v for d, v in zip(dimensions, key_vals)}
         for level in risk_levels:
@@ -174,10 +187,10 @@ def score_slices(
 
     n_overlap = len({tuple(r.key.items()) for r in results if r.has_overlap})
     if n_overlap:
-        logger.warning(
-            "%d slice(s) contain time-overlapping trades — their single-stream "
-            "pass-rate/DD is OPTIMISTIC (concurrency not modelled). Score those "
-            "as a portfolio for a correct combined drawdown.", n_overlap,
+        logger.info(
+            "%d slice(s) contain time-overlapping trades — scored with the "
+            "concurrency-aware challenge sim (worst-case simultaneous MAE stacked). "
+            "Marked !OVERLAP in the output.", n_overlap,
         )
 
     results.sort(key=lambda r: r.sort_key)
