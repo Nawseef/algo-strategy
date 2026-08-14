@@ -34,8 +34,8 @@ logger = get_logger(__name__)
 # the activity/quality gates. A strategy that trades often, consistently, and
 # with WR>=40% but still breaches max-DD most of the time is a blow-up machine,
 # not a deployable edge. These are the challenge-survival thresholds.
-MIN_PASS_RATE = 0.60      # must pass the 2-step eval on >=60% of start dates
-MAX_BLOWUP_RATE = 0.05    # must breach MAX DD (account-ending) on <=5% of runs
+MIN_PASS_RATE = 0.60      # must pass the 2-step eval on >=60% of decisive start dates
+MAX_BLOWUP_RATE = 0.05    # must LOSE THE ACCOUNT (breach max-DD OR daily-DD) on <=5% of decisive runs
 
 # The dimensions you can slice by (attributes on SimulatedTrade).
 # ``strategy_id`` (e.g. orb_london_6b) is the CONFIGURED variant — the clean
@@ -76,15 +76,18 @@ class SliceResult:
 
     @property
     def sort_key(self) -> tuple:
-        # Fully-qualifying slices first, then by pass-rate / blow-up.
+        # Fully-qualifying slices first, then by pass-rate / account-loss rate.
         return (0 if self.qualifies else 1,
-                -self.mc.pass_rate, self.mc.blowup_rate, -self.mc.phase1_pass_rate)
+                -self.mc.pass_rate, self.mc.account_ending_rate, -self.mc.phase1_pass_rate)
 
     @property
     def passes_challenge(self) -> bool:
-        """Survives the prop challenge: passes often enough AND rarely blows up."""
+        """Survives the prop challenge: passes often enough AND rarely loses the
+        account. 'Loses the account' = breaches EITHER the max-DD or the daily-DD
+        limit (account_ending_rate) — both terminate a real evaluation, so daily
+        breaches count here, not just max-DD."""
         return (self.mc.pass_rate >= self.min_pass_rate
-                and self.mc.blowup_rate <= self.max_blowup_rate)
+                and self.mc.account_ending_rate <= self.max_blowup_rate)
 
     @property
     def qualifies(self) -> bool:
@@ -111,10 +114,16 @@ class SliceResult:
                 f"[{d.flags()} {chal}] {'DEPLOY' if self.qualifies else '  -   '}"
             )
         overlap_mark = " !OVERLAP" if self.has_overlap else ""
+        # 'blowup' shown = account-ending rate (max-DD OR daily-DD breach). If any
+        # daily breaches contributed, break them out so it's transparent.
+        dy = self.mc.daily_halt_rate * 100
+        blow = f"blowup={self.mc.account_ending_rate*100:5.1f}%"
+        if dy > 0.05:
+            blow += f"(dy{dy:.0f}%)"
         return (
             f"{self.label():48s} risk={self.risk_pct:>4.2f}% | n={self.trade_count:<5d} "
             f"pass={self.mc.pass_rate*100:5.1f}%(d{self.mc.decisive_runs}) "
-            f"blowup={self.mc.blowup_rate*100:5.1f}% inc={self.mc.incomplete_rate*100:3.0f}% "
+            f"{blow} inc={self.mc.incomplete_rate*100:3.0f}% "
             f"medDays={self.mc.median_days_to_pass:>3.0f} worstDD={self.mc.worst_dd_pct:4.1f}%"
             f"{deploy_cols}{overlap_mark}"
         )
@@ -208,7 +217,7 @@ def format_slices(
     n_gates = sum(1 for r in results if r.deploy and r.deploy.deployable)
     header = (
         "flags: F=frequency(>=5/mo) C=consistency(>=10 active mo/yr) "
-        "D=dayConc(<=30%) Q=quality(WR>=40% or exp>0) P=challenge(pass>=60% & blowup<=5%); UPPER=pass\n"
+        "D=dayConc(<=30%) Q=quality(WR>=40% or exp>0) P=challenge(pass>=60% & acctLoss<=5%); UPPER=pass\n"
         f"DEPLOYABLE (survives challenge AND all 4 gates): {n_deploy} of {len(results)}"
         f"   [passed the 4 gates but NOT the challenge: {n_gates - n_deploy}]\n"
     )

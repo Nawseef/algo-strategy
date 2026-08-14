@@ -103,14 +103,14 @@ def format_oos(
     lines = []
     for r in (shown[:top] if top else shown):
         d = r.discover
-        dcol = (f"D:{d.mc.pass_rate*100:5.1f}%/{d.mc.blowup_rate*100:4.1f}% "
+        dcol = (f"D:{d.mc.pass_rate*100:5.1f}%/{d.mc.account_ending_rate*100:4.1f}% "
                 f"[{d.deploy.flags()} {'P' if d.passes_challenge else 'p'}]")
         if r.confirm is None:
             ccol = "C: (no trades in confirm window)"
             verdict = "NOT-CONFIRMED"
         else:
             c = r.confirm
-            ccol = (f"C:{c.mc.pass_rate*100:5.1f}%/{c.mc.blowup_rate*100:4.1f}% "
+            ccol = (f"C:{c.mc.pass_rate*100:5.1f}%/{c.mc.account_ending_rate*100:4.1f}% "
                     f"[{c.deploy.flags()} {'P' if c.passes_challenge else 'p'}]")
             verdict = "ROBUST" if r.robust else "FAILED-OOS"
         lines.append(f"{d.label():44s} risk={d.risk_pct:>4.2f}% | {dcol} -> {ccol}  = {verdict}")
