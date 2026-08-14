@@ -67,12 +67,16 @@ class SessionORB(EntryStrategy):
         allow_long: bool = True,
         allow_short: bool = True,
         instruments: tuple[str, ...] = (),
+        timeframe: Timeframe = Timeframe.M5,
         session_fn=None,
     ) -> None:
         self.session = session
         self.range_bars = range_bars
         self.buffer_frac = buffer_frac
         self.trend_ema = trend_ema
+        # The timeframe this variant trades on (5m base is aggregated up to it by
+        # the entry replay). range_bars is counted in THIS timeframe's bars.
+        self.timeframe = timeframe
         self.allow_long = allow_long
         self.allow_short = allow_short
         self.instruments = instruments
