@@ -11,7 +11,9 @@ import types
 
 import pytest
 
+from app.cfd_research.challenge_sim import MonteCarloResult
 from app.cfd_research.oos import validate_oos
+from app.cfd_research.slice_scorer import SliceResult
 from app.cfd_research.strategy_registry import available, build_variants
 from app.cfd_risk.costs import (
     COST_MODEL_RAW,
@@ -71,6 +73,7 @@ class _MC:
     def __init__(self, pr=0.7, br=0.0):
         self.pass_rate = pr
         self.blowup_rate = br
+        self.account_ending_rate = br
 
 
 class _Deploy:
@@ -125,3 +128,30 @@ def test_oos_partition_and_robust_join():
     assert by["US30 x"].confirm is None
     # Robust row sorts first.
     assert rows[0].discover.label() == "DE40 x"
+
+
+# ─── Daily-DD breaches count as account loss in the survival gate ────────────
+
+
+def test_daily_breach_counts_as_account_loss():
+    # 65% pass, only 1% max-DD breach, but 30% DAILY-DD breaches. A daily breach
+    # terminates the eval too, so account-loss = 31% -> must NOT be deployable.
+    mc = MonteCarloResult(runs=100, passed=65, failed_max=1, failed_daily=30,
+                          timeouts=4, incompletes=0)
+    assert mc.decisive_runs == 100
+    assert mc.pass_rate == 0.65
+    assert mc.blowup_rate == 0.01               # max-DD only (granular sub-metric)
+    assert mc.daily_halt_rate == 0.30
+    assert mc.account_ending_rate == 0.31       # max + daily = true account-loss rate
+
+    r = SliceResult(key={}, trade_count=300, risk_pct=1.0, mc=mc)
+    # Pre-fix (blowup=1% <= 5%, pass 65% >= 60%) this WRONGLY passed. Now the
+    # 31% daily-driven account loss correctly fails the challenge.
+    assert r.passes_challenge is False
+
+
+def test_no_daily_breach_still_passes():
+    mc = MonteCarloResult(runs=100, passed=95, failed_max=1, failed_daily=0, incompletes=0)
+    r = SliceResult(key={}, trade_count=300, risk_pct=1.0, mc=mc)
+    assert mc.account_ending_rate == 0.01
+    assert r.passes_challenge is True

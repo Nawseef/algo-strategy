@@ -156,14 +156,31 @@ class MonteCarloResult:
 
     @property
     def blowup_rate(self) -> float:
-        """Fraction of DECISIVE runs that breached MAX DD (account-ending)."""
+        """Fraction of DECISIVE runs that breached the MAX (overall) DD.
+
+        Granular sub-metric. For the deployable survival gate use
+        ``account_ending_rate``, which also counts daily-DD breaches — both end a
+        real prop account/evaluation."""
         d = self.decisive_runs
         return self.failed_max / d if d else 0.0
 
     @property
     def daily_halt_rate(self) -> float:
+        """Fraction of DECISIVE runs that breached the DAILY DD limit. In a real
+        2-step evaluation this TERMINATES the account (a fail), same terminal
+        outcome as a max-DD breach — it is not a soft halt."""
         d = self.decisive_runs
         return self.failed_daily / d if d else 0.0
+
+    @property
+    def account_ending_rate(self) -> float:
+        """Fraction of DECISIVE runs that LOST THE ACCOUNT — breached EITHER the
+        max-DD or the daily-DD limit. Both are hard failures that end a prop
+        evaluation, so this (not blowup_rate alone) is the true survival metric
+        the deployable gate checks. (Timeouts are excluded — running out of
+        calendar time is 'didn't pass in time', not an account loss.)"""
+        d = self.decisive_runs
+        return (self.failed_max + self.failed_daily) / d if d else 0.0
 
     @property
     def incomplete_rate(self) -> float:
@@ -189,8 +206,10 @@ class MonteCarloResult:
         return (
             f"runs={self.runs} (decisive={self.decisive_runs}) "
             f"pass={self.pass_rate*100:.1f}% "
-            f"(P1={self.phase1_pass_rate*100:.1f}%) blowup={self.blowup_rate*100:.1f}% "
-            f"dailyHalt={self.daily_halt_rate*100:.1f}% incomplete={self.incomplete_rate*100:.1f}% "
+            f"(P1={self.phase1_pass_rate*100:.1f}%) "
+            f"accountEnding={self.account_ending_rate*100:.1f}% "
+            f"(maxDD={self.blowup_rate*100:.1f}% daily={self.daily_halt_rate*100:.1f}%) "
+            f"incomplete={self.incomplete_rate*100:.1f}% "
             f"avgDays={self.avg_days_to_pass:.0f} medDays={self.median_days_to_pass:.0f} "
             f"worstDD={self.worst_dd_pct:.1f}%"
         )

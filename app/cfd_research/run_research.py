@@ -374,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Deployability gates: >={args.min_trades_month:g}/mo, >={args.min_active_months} active "
           f"mo/full-yr, <={args.max_day_conc*100:g}% day-conc, WR>={args.min_wr*100:g}% or exp>0")
     print(f"Challenge-survival (for DEPLOYABLE): pass>={args.min_pass_rate*100:g}% and "
-          f"blowup<={args.max_blowup_rate*100:g}%")
+          f"account-loss (max-DD OR daily-DD breach) <={args.max_blowup_rate*100:g}%")
     print("-" * 100)
     print(format_slices(results, top=args.top, deployable_only=args.deployable_only))
     print("=" * 100)
