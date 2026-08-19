@@ -497,12 +497,12 @@ class CFDPaperTradingApp:
         sess = ", ".join(_SESSION_LABEL.get(s, s) for s in st["active_sessions"]) or "none"
         strat_ids = [x.strategy_id for x in self._strategies]
         # Each channel gets a session-start banner listing ONLY its own streams,
-        # tagged live if any of them place real orders.
+        # with a Mode line composed from those streams' kinds (paper/demo/live).
         for notifier, acct_ids in self._notifier_groups():
-            live = any(s.places_orders for s in self._streams if s.stream_id in acct_ids)
+            kinds = [s.kind for s in self._streams if s.stream_id in acct_ids]
             notifier.session_start(
                 self._summaries_for(acct_ids), strat_ids,
-                bool(st["market_open"]), sess, live=live,
+                bool(st["market_open"]), sess, kinds=kinds,
             )
         self._start_monitor()
 

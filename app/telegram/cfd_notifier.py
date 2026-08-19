@@ -185,6 +185,26 @@ def _exit_reason_icon(reason: ExitReason) -> str:
     return _EXIT_REASON_ICON.get(reason.value, "\u2022")
 
 
+def _compose_mode(kinds: list[str]) -> str:
+    """Human mode summary from the running streams' kinds, e.g.
+    ['paper','demo'] -> 'paper, demo';  ['paper','live','live'] -> 'paper, live (2)'.
+    A single stream of a kind shows just the kind; multiples show a count."""
+    order = ["paper", "demo", "live"]
+    counts: dict[str, int] = {}
+    for k in kinds:
+        counts[k] = counts.get(k, 0) + 1
+    parts = []
+    for k in order:
+        n = counts.pop(k, 0)
+        if n == 1:
+            parts.append(k)
+        elif n > 1:
+            parts.append(f"{k} ({n})")
+    for k, n in counts.items():   # any non-standard kinds, keep them too
+        parts.append(k if n == 1 else f"{k} ({n})")
+    return ", ".join(parts) or "none"
+
+
 class CFDTradeNotifier:
     """Rich, multi-account CFD trade + portfolio notifications over Telegram."""
 
@@ -540,7 +560,7 @@ class CFDTradeNotifier:
 
     def session_start(
         self, summaries: list[dict], strategies: list[str], market_open: bool, sessions: str,
-        live: bool = False,
+        kinds: list[str] | None = None,
     ) -> None:
         self._session_start_ms = datetime.now(timezone.utc).timestamp() * 1000
         accts = ", ".join(
@@ -555,12 +575,12 @@ class CFDTradeNotifier:
             f"Strategies: {', '.join(strategies) or '(none)'}",
             f"Market: {_b('OPEN') if market_open else _b('CLOSED')} | {sessions or 'closed'}",
         ]
-        if live:
-            # Bolded and distinct from the paper case — the single most
-            # important fact in this message when it's true.
-            lines.append(_b("\U0001f6a8 Mode: LIVE — REAL cTrader orders will be placed"))
-        else:
-            lines.append(_i("Mode: PAPER (no real orders)"))
+        kinds = kinds or []
+        lines.append(f"Mode: {_b(_compose_mode(kinds))}")
+        # Honest, non-scary note that some streams place real orders (demo places
+        # real orders on a demo account; live on funded money).
+        if any(k in ("demo", "live") for k in kinds):
+            lines.append(_i("demo/live place real cTrader orders"))
         self.send("\n".join(lines))
 
     def session_end(self, summaries: list[dict]) -> None:
