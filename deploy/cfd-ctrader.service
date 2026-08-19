@@ -1,11 +1,10 @@
 [Unit]
 Description=cTrader CFD candle archiver — push feed -> 5m candles -> research_db.live_candles
-# Direct connection to Spotware's cloud (no SSH tunnel / feed VM). Runs IN
-# PARALLEL with mt5-consumer during the validation/soak phase: both write
-# live_candles with ON CONFLICT DO NOTHING, so there are no duplicates and the
-# two feeds gap-fill each other. No Conflicts= line on purpose. When you are
-# confident cTrader is the single source of truth, stop+disable mt5-consumer
-# (and the tunnel) and this becomes the sole live writer.
+# Direct connection to Spotware's cloud (no SSH tunnel / feed VM). As of the
+# 19 Aug 2026 cutover this is the SOLE live feed writing live_candles; the MT5
+# consumer/tunnel/watchdog are stopped + disabled and the x86 feed VM is parked
+# as a fallback. It also self-heals candle gaps after a disconnect via the
+# trendbar backfill (app/broker/ctrader_backfill.py). See CFD_SYSTEM.md §16.
 After=network-online.target postgresql.service
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -14,16 +13,24 @@ StartLimitIntervalSec=0
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/algo-strategy
-# Candle-archiver mode: build + store 5m candles to STAGING TABLE (for comparison
-# against MT5 live_candles before cutover). Once you've validated the feeds match,
-# set CFD_CTRADER_STAGING=false to write directly to live_candles (and retire MT5).
+# Candle-archiver mode (no strategies): build + store 5m candles. Post-cutover
+# CFD_CTRADER_STAGING=false -> writes directly to live_candles (the sole feed).
+# For a fresh staging/soak comparison against a parallel MT5 feed, set it back to
+# true (writes ctrader_staging_candles; compare with app.tools.compare_candles).
 Environment=PYTHONUNBUFFERED=1
-Environment=CFD_PAPER_STRATEGIES=none
 Environment=CFD_PAPER_ARCHIVE_CANDLES=true
-Environment=CFD_CTRADER_STAGING=true
-Environment=CFD_PAPER_SUMMARY_MIN=0
-Environment=MT5_TELEGRAM_BOT_TOKEN=
-Environment=CTRADER_TELEGRAM_BOT_TOKEN=
+Environment=CFD_CTRADER_STAGING=false
+# NOTE: CFD_PAPER_STRATEGIES is intentionally NOT set here so the value from
+# .env drives it (post-cutover this process is the sole feed AND trader). .env
+# currently runs the USDJPY ORB strategies on paper + demo. To make this a
+# candle-archiver ONLY (no trading), set CFD_PAPER_STRATEGIES=none here.
+# CFD_PAPER_SUMMARY_MIN / CFD_PAPER_EXECUTION_MODE also come from .env.
+# Telegram alerts ON (start/stop, reconnect, token-failure) — the CFD bot creds
+# are read from .env (MT5_TELEGRAM_BOT_TOKEN / MT5_TELEGRAM_CHAT_ID). This is the
+# sole live feed post-cutover, so it must alert. Do NOT blank these.
+# Execution streams (paper/demo/live) come from CFD_PAPER_EXECUTION_MODE in .env
+# (currently "both" -> paper + demo). With CFD_PAPER_STRATEGIES=none there are no
+# signals, so no orders are placed on any stream until a strategy is added.
 ExecStart=/home/ubuntu/algo-strategy/venv/bin/python -m app.main_ctrader
 Restart=always
 RestartSec=10
