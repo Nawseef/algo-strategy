@@ -1067,6 +1067,36 @@ class ResearchStore:
             return int(rows[0]["m"])
         return None
 
+    def get_candle_timestamps(
+        self, instrument: str, timeframe: str, start_ms: float, end_ms: float,
+        staging: bool = False,
+    ) -> list[int]:
+        """All stored candle open-times (ms) for a symbol in ``[start_ms, end_ms]``,
+        from the live OR staging table. Used by the cTrader backfill to write only
+        the bars that are actually missing (fills interior holes idempotently).
+        """
+        table = "ctrader_staging_candles" if staging else "live_candles"
+        ph = "%s" if self._use_postgres else "?"
+        sql = (f"SELECT timestamp_ms FROM {table} WHERE instrument={ph} AND timeframe={ph} "
+               f"AND timestamp_ms >= {ph} AND timestamp_ms <= {ph}")
+        rows = self._query(sql, (instrument, timeframe, start_ms, end_ms))
+        return [int(r["timestamp_ms"]) for r in rows]
+
+    def get_last_candle_ms(
+        self, instrument: str, timeframe: str, staging: bool = False
+    ) -> int | None:
+        """Open time (ms) of the most recent stored candle in the live OR staging
+        table, or None. Used by the cTrader backfill to resume from the last
+        archived candle in whichever table the feed writes to.
+        """
+        table = "ctrader_staging_candles" if staging else "live_candles"
+        ph = "%s" if self._use_postgres else "?"
+        sql = f"SELECT MAX(timestamp_ms) AS m FROM {table} WHERE instrument={ph} AND timeframe={ph}"
+        rows = self._query(sql, (instrument, timeframe))
+        if rows and rows[0]["m"] is not None:
+            return int(rows[0]["m"])
+        return None
+
     def get_live_candle_stats(self, session_date: str) -> dict[str, Any]:
         """Totals for the daily heartbeat: overall count + today's activity."""
         total = self.get_live_candle_count()

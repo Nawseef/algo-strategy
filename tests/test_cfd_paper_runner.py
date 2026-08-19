@@ -73,7 +73,13 @@ class _DummyNotifier:
 def _make_app(store, strategies):
     """Build a runner with an injected store, no archiving, dummy notifier."""
     os.environ["CFD_PAPER_ARCHIVE_CANDLES"] = "false"
-    # Import here so the env var above is honoured at construction.
+    # Force a hermetic PAPER config so these wiring tests don't depend on the
+    # production .env or a data/cfd_streams.json file. Pointing CFD_STREAMS_CONFIG
+    # at a nonexistent path forces the legacy env-fallback stream loader.
+    os.environ["CFD_STREAMS_CONFIG"] = "/nonexistent/streams.json"
+    os.environ["CFD_PAPER_EXECUTION_MODE"] = "paper"
+    os.environ["CFD_PAPER_ACCOUNT_ID"] = "cfd_demo"
+    # Import here so the env vars above are honoured at construction.
     from app.main_cfd_paper import CFDPaperTradingApp
 
     app = CFDPaperTradingApp(store=store, notifier=_DummyNotifier())
@@ -266,6 +272,9 @@ def test_strategy_selection_from_registry(store):
     reg.register(_NoTrade())
 
     os.environ["CFD_PAPER_ARCHIVE_CANDLES"] = "false"
+    os.environ["CFD_STREAMS_CONFIG"] = "/nonexistent/streams.json"
+    os.environ["CFD_PAPER_EXECUTION_MODE"] = "paper"
+    os.environ["CFD_PAPER_ACCOUNT_ID"] = "cfd_demo"
     os.environ["CFD_PAPER_STRATEGIES"] = "_stub_always_long"
     try:
         from app.main_cfd_paper import CFDPaperTradingApp

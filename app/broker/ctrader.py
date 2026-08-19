@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from typing import Any, Callable
 
 from app.broker.base import (
@@ -255,6 +256,64 @@ class CTraderBroker(BaseBroker):
         """
         return self._symbol_details.get(symbol)
 
+    async def fetch_trendbars(
+        self, symbol: str, from_dt: datetime, to_dt: datetime, period: Any | None = None,
+    ) -> list[Any]:
+        """Fetch historical OHLC bars for ``symbol`` in ``[from_dt, to_dt]`` (UTC).
+
+        Thin async wrapper over the Open API ``get_trendbars`` (M5 by default),
+        used by the candle-archive backfill to self-heal gaps after a disconnect.
+        Returns the library's ``Trendbar`` objects (``timestamp`` = bar open,
+        ``open/high/low/close`` Decimal, ``volume`` int), ascending by time — or
+        an empty list if the symbol didn't resolve.
+
+        MUST be awaited on the broker's event loop: at startup the loop is idle
+        (the runner drives it with ``run_until_complete``); on reconnect the feed
+        awaits this from inside the running loop.
+        """
+        from ctrader_api_client import TrendbarPeriod
+
+        sym_id = self._symbol_map.get(symbol)
+        if sym_id is None or self._client is None:
+            return []
+        per = period if period is not None else TrendbarPeriod.M5
+        return await self._client.market_data.get_trendbars(
+            self._account_id, sym_id, per, from_dt, to_dt
+        )
+
+    def get_account_info(self) -> dict[str, Any] | None:
+        """Read the REAL account balance + leverage from cTrader.
+
+        Used to seed a live/demo executor's RiskGuard with the account's ACTUAL
+        balance (so risk-% sizing is a % of the real balance, not a configured
+        guess) and to log the account leverage. Driven synchronously on the
+        broker loop at startup (the loop is idle before ``consume()``), mirroring
+        ``get_symbol_spec``. Returns ``None`` on any failure (caller falls back).
+        """
+        if self._client is None or self._loop is None:
+            return None
+        if self._loop.is_running():
+            logger.warning("get_account_info skipped: loop already running")
+            return None
+        try:
+            acct = self._loop.run_until_complete(
+                self._client.accounts.get_trader(self._account_id)
+            )
+        except Exception as e:  # noqa: BLE001 - never let this break startup
+            logger.warning("cTrader get_account_info failed: %s", e)
+            return None
+        if acct is None:
+            return None
+        # leverage_in_cents: 10000 => 1:100.
+        lev_cents = getattr(acct, "leverage_in_cents", None)
+        leverage = (lev_cents / 100.0) if lev_cents else None
+        return {
+            "balance": float(acct.balance),
+            "leverage": leverage,
+            "account_type": getattr(getattr(acct, "account_type", None), "name", None),
+            "broker_name": getattr(acct, "broker_name", ""),
+        }
+
     @property
     def client(self) -> Any:
         if self._client is None:
@@ -320,6 +379,8 @@ class CTraderFeedClient(BrokerFeed):
         is_market_open: Callable[[], bool] | None = None,
         seconds_until_open: Callable[[], float] | None = None,
         alert_cb: Callable[[str], None] | None = None,
+        reconnect_backfill: Callable[[], Any] | None = None,
+        reconnect_backfill_timeout_s: float = 120.0,
     ) -> None:
         self._broker = broker
         self._config = config
@@ -330,6 +391,13 @@ class CTraderFeedClient(BrokerFeed):
         # Optional market-schedule hooks (same as MT5FeedClient).
         self._is_market_open = is_market_open
         self._seconds_until_open = seconds_until_open
+
+        # Optional async callback (returns a coroutine) to self-heal the candle
+        # archive after a reconnect. Run as a background task (NOT awaited inline)
+        # so it never blocks live-tick processing, with a hard timeout so a slow
+        # historical request can't leak a stuck task.
+        self._reconnect_backfill = reconnect_backfill
+        self._reconnect_backfill_timeout_s = reconnect_backfill_timeout_s
 
         # Optional alert sink (e.g. notifier.send) for operational events the
         # library surfaces: a dead refresh token, a lost market-data
@@ -463,6 +531,25 @@ class CTraderFeedClient(BrokerFeed):
         async def _on_reconnect(event) -> None:
             restored = getattr(event, "restored_accounts", None)
             self._alert(f"\U0001f501 cTrader reconnected (restored: {restored})")
+            # Self-heal the candle archive for the gap missed while disconnected.
+            # Run as a background task so it does NOT block live-tick processing,
+            # bounded by a timeout so a slow/hung historical request can't stick.
+            if self._reconnect_backfill is not None:
+                asyncio.create_task(self._run_reconnect_backfill())
+
+    async def _run_reconnect_backfill(self) -> None:
+        """Run the reconnect backfill off the event path, with a hard timeout."""
+        try:
+            await asyncio.wait_for(
+                self._reconnect_backfill(), timeout=self._reconnect_backfill_timeout_s
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "reconnect backfill timed out after %.0fs — will retry on next reconnect/startup",
+                self._reconnect_backfill_timeout_s,
+            )
+        except Exception as e:  # noqa: BLE001 - backfill must not crash the feed
+            logger.error("reconnect backfill failed: %s", e)
 
     async def _async_consume(self) -> None:
         """Subscribe to spots and wait for events (runs inside the asyncio loop)."""

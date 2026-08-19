@@ -18,7 +18,7 @@ same fan-out structure will drive it.
 from __future__ import annotations
 
 from app.cfd_execution.account import AccountConfig
-from app.cfd_execution.base import ExitReason, ManagedPosition
+from app.cfd_execution.base import BaseExecutor, ExitReason, ManagedPosition
 from app.cfd_execution.paper_executor import PaperExecutor
 from app.cfd_risk.costs import CFDCostModel
 from app.cfd_strategy.base import CFDSignal
@@ -30,16 +30,21 @@ logger = get_logger(__name__)
 
 class MultiAccountManager:
     """
-    Routes signals + ticks to one PaperExecutor per configured account.
+    Routes signals + ticks to one executor per configured account.
 
     Usage:
         mgr = MultiAccountManager(store=store, notifier=notifier)
-        mgr.add_account(AccountConfig("demo", 100_000))
+        mgr.add_account(AccountConfig("demo", 100_000))          # PAPER (default)
         # later, when you join firms:
         mgr.add_account(AccountConfig("ftmo_100k", 100_000, rules=FTMO_RULES))
 
         mgr.on_signal(signal)                 # -> every enabled account
         mgr.on_tick("XAUUSD", bid, ask, ts)   # -> every account manages its own
+
+    For LIVE order routing (real orders via cTrader — even on a demo account,
+    this places actual trades), build a ``CTraderExecutor`` yourself (it needs
+    the authenticated broker) and register it with ``add_executor`` instead of
+    ``add_account``. See ``app/main_cfd_paper.py`` (``CFD_PAPER_EXECUTION_MODE``).
     """
 
     def __init__(
@@ -53,14 +58,13 @@ class MultiAccountManager:
         self._notifier = notifier
         self._cost_model = cost_model
         self._alert_trades = alert_trades
-        self._executors: dict[str, PaperExecutor] = {}
+        self._executors: dict[str, BaseExecutor] = {}
 
     # ─── Account management ──────────────────────────────────────
 
     def add_account(self, account: AccountConfig) -> PaperExecutor:
-        """Register an account and build its executor."""
-        if account.account_id in self._executors:
-            raise ValueError(f"Account '{account.account_id}' already added")
+        """Register an account with a PAPER executor (simulated fills, no
+        broker orders). This is the default / safe path."""
         ex = PaperExecutor(
             account,
             store=self._store,
@@ -68,19 +72,33 @@ class MultiAccountManager:
             cost_model=self._cost_model,
             alert_trades=self._alert_trades,
         )
-        self._executors[account.account_id] = ex
+        self.add_executor(ex)
         logger.info(
-            "Added account '%s' (balance=$%.2f, firm=%s, risk/trade=%.2f%%)",
+            "Added PAPER account '%s' (balance=$%.2f, firm=%s, risk/trade=%.2f%%)",
             account.account_id, account.initial_balance,
             account.rules.firm_name, account.effective_risk_per_trade_pct(),
         )
         return ex
 
-    def executor(self, account_id: str) -> PaperExecutor:
+    def add_executor(self, executor: BaseExecutor) -> BaseExecutor:
+        """Register a pre-built executor directly (used for LIVE/CTraderExecutor,
+        which needs the authenticated broker to construct)."""
+        if executor.account_id in self._executors:
+            raise ValueError(f"Account '{executor.account_id}' already added")
+        self._executors[executor.account_id] = executor
+        return executor
+
+    def executor(self, account_id: str) -> BaseExecutor:
         return self._executors[account_id]
 
-    def executors(self) -> list[PaperExecutor]:
+    def executors(self) -> list[BaseExecutor]:
         return list(self._executors.values())
+
+    @property
+    def cost_model(self) -> CFDCostModel | None:
+        """The cost model shared by executors added via ``add_account``, so a
+        LIVE executor built separately (see ``add_executor``) can reuse it."""
+        return self._cost_model
 
     @property
     def account_ids(self) -> list[str]:

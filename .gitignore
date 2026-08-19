@@ -33,3 +33,9 @@ data/ctrader_tokens.json
 
 # Dukascopy fetch (background runner pidfile)
 logs/dukascopy_fetch.pid
+
+# Persisted research trades (large; regenerated from run_research --persist)
+*.jsonl
+*.jsonl.gz
+*.trades.jsonl
+*.trades.jsonl.gz
