@@ -95,7 +95,7 @@ from app.core.events import EventBus
 from app.core.models import Candle, Timeframe
 from app.db.live_candle_store import LiveCandleStore
 from app.db.research_store import ResearchStore
-from app.telegram.cfd_notifier import CFDTradeNotifier
+from app.telegram.cfd_notifier import ENGINE_NAME, CFDTradeNotifier
 from app.telegram.mt5_notifier import MT5Notifier
 from app.utils import forex_hours
 from app.utils.config import load_config
@@ -223,9 +223,14 @@ class CFDPaperTradingApp:
             chats = self._feed_cfg.telegram_chat_ids or self._config.mt5.telegram_chat_ids
             transport = MT5Notifier(bot, chats)
             self._notifier = CFDTradeNotifier(transport)
-        # Periodic portfolio summary cadence (minutes); 0 disables.
-        self._summary_interval_s = max(0.0, _env_float("CFD_PAPER_SUMMARY_MIN", 30.0)) * 60.0
-        self._last_summary_ts = 0.0
+        # Periodic portfolio summary cadence (minutes); 0 disables. Default hourly.
+        # Fired on the ROUND wall-clock boundary (top of the hour for 60m), not
+        # "N minutes since boot", by tracking the interval bucket on the epoch.
+        self._summary_interval_s = max(0.0, _env_float("CFD_PAPER_SUMMARY_MIN", 60.0)) * 60.0
+        self._last_summary_bucket = (
+            int(time.time() // self._summary_interval_s)
+            if self._summary_interval_s > 0 else 0
+        )
 
         # ── Trading streams (paper / demo / live), config-driven. ──
         # Each stream is an independent account fed the SAME signals, with its own
@@ -468,7 +473,7 @@ class CFDPaperTradingApp:
 
         st = forex_hours.status()
         logger.info("=" * 64)
-        logger.info("CFD TRADER — feed -> 5m candles -> strategies -> executors")
+        logger.info("%s — feed -> 5m candles -> strategies -> executors", ENGINE_NAME)
         for s in self._streams:
             logger.info("  stream '%s' [%s] balance $%.0f risk %.2f%% -> %s",
                         s.stream_id, s.kind.upper(), s.balance, s.risk_pct,
@@ -721,17 +726,21 @@ class CFDPaperTradingApp:
                     logger.error("strategy %s on_day_reset failed: %s", s.strategy_id, e)
         self._last_trading_day = td
 
-        # Periodic portfolio summary (market hours only).
-        if self._summary_interval_s > 0 and market_open:
-            now_s = time.time()
-            if now_s - self._last_summary_ts >= self._summary_interval_s:
-                self._last_summary_ts = now_s
-                sessions = "+".join(forex_hours.active_sessions()) or "closed"
-                for notifier, acct_ids in self._notifier_groups():
-                    try:
-                        notifier.periodic_summary(self._summaries_for(acct_ids), sessions)
-                    except Exception as e:  # noqa: BLE001
-                        logger.error("periodic summary failed: %s", e)
+        # Periodic portfolio summary, aligned to the round wall-clock boundary
+        # (e.g. top of each UTC hour), and only while the market is open. The
+        # bucket advances every interval even when closed, so we never fire a
+        # stale "catch-up" summary mid-hour when the market reopens.
+        if self._summary_interval_s > 0:
+            bucket = int(time.time() // self._summary_interval_s)
+            if bucket != self._last_summary_bucket:
+                self._last_summary_bucket = bucket
+                if market_open:
+                    sessions = "+".join(forex_hours.active_sessions()) or "closed"
+                    for notifier, acct_ids in self._notifier_groups():
+                        try:
+                            notifier.periodic_summary(self._summaries_for(acct_ids), sessions)
+                        except Exception as e:  # noqa: BLE001
+                            logger.error("periodic summary failed: %s", e)
 
         # Weekend flatten: fire once when we enter the pre-close window; re-arm
         # after the market closes for the weekend.
@@ -762,18 +771,18 @@ class CFDPaperTradingApp:
 
         if self._last_market_open is not None and open_now != self._last_market_open:
             if open_now:
-                self._notifier.send("\U0001f7e2 Market OPEN — trading active")
+                self._notifier.send("\U0001f514 Market OPEN — trading active")
             else:
                 secs = forex_hours.seconds_until_market_open()
                 self._notifier.send(
-                    f"\U0001f534 Market CLOSED — next open in ~{secs / 3600:.1f}h"
+                    f"\U0001f515 Market CLOSED — next open in ~{secs / 3600:.1f}h"
                 )
         self._last_market_open = open_now
 
-        for s in sorted(sessions_now - self._last_sessions):
-            self._notifier.send(f"\U0001f552 {_SESSION_LABEL.get(s, s)} session STARTED")
-        for s in sorted(self._last_sessions - sessions_now):
-            self._notifier.send(f"\U0001f552 {_SESSION_LABEL.get(s, s)} session ENDED")
+        # Per-session STARTED/ENDED banners (Sydney/Tokyo/London/New York) are
+        # intentionally NOT sent — they were pure noise now that the hourly
+        # portfolio summary shows the active session. The weekly Market
+        # OPEN/CLOSED banner above is kept (rare + meaningful).
         self._last_sessions = sessions_now
 
     # ─── Feed connect / backfill ─────────────────────────────────
@@ -823,7 +832,7 @@ class CFDPaperTradingApp:
                 if i < attempts:
                     time.sleep(delay_s)
         self._notifier.send(
-            "\u26a0\ufe0f CFD paper trader cannot reach the feed (tunnel/RPyC down) — will keep retrying"
+            f"\u26a0\ufe0f {ENGINE_NAME} cannot reach the feed — will keep retrying"
         )
         raise RuntimeError("MT5 feed connect failed after retries")
 

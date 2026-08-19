@@ -34,6 +34,7 @@ per-account tally is guarded by a lock.
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -48,6 +49,11 @@ logger = get_logger(__name__)
 # Day-loss thresholds (as % of an account's initial balance) for exit-alert warnings.
 _CAUTION_LOSS_PCT = 1.0
 _WARNING_LOSS_PCT = 2.0
+
+# The trading engine's display name (shown in start/stop/summary banners).
+# Generic on purpose — it runs paper + demo + multiple live firms, so it isn't
+# tied to any one strategy or account. Override with CFD_ENGINE_NAME.
+ENGINE_NAME = os.getenv("CFD_ENGINE_NAME", "SENTINEL").strip() or "SENTINEL"
 
 
 # How many recent trades to show in the "form" strip, e.g. "L L W L W W L".
@@ -146,8 +152,15 @@ def _code(text: str) -> str:
 # Direction-aware entry icons (color + arrow, so LONG/SHORT is visible at a
 # glance without reading the text).
 _ENTRY_ICON = {
-    "LONG": "\U0001f7e2\u2b06\ufe0f",   # 🟢⬆️
-    "SHORT": "\U0001f534\u2b07\ufe0f",  # 🔴⬇️
+    "LONG": "\U0001f402",    # 🐂 bull  (long)
+    "SHORT": "\U0001f43b",   # 🐻 bear  (short)
+}
+
+# Per-KIND header icon (the account TYPE the trade ran on).
+_KIND_ICON = {
+    "paper": "\U0001f4c4",   # 📄 paper  (simulated, no broker orders)
+    "demo": "\U0001f4e5",    # 📥 demo   (real orders on a demo account)
+    "live": "\u26a1",        # ⚡ live   (real prop-firm / funded money)
 }
 
 # Outcome icons for exits — win/loss are unmistakable (check+cash vs cross+
@@ -253,9 +266,13 @@ class CFDTradeNotifier:
 
         dir_icon = _ENTRY_ICON.get(pos.direction.value, "\U0001f4e5")
         label = f"{kind.upper()} ENTRY"
+        # Header = the EVENT (entry) + account + strategy. The bull/bear icon
+        # belongs on the DIRECTION line below, next to LONG/SHORT — not up here
+        # (a bull next to "DEMO" would read as if it tags the account).
+        kind_icon = _KIND_ICON.get(kind, "\U0001f4e5")
         lines = [
-            f"{dir_icon} {_b(label)} [{account_id}] \u2014 {pos.strategy_id}",
-            f"{_b(pos.direction.value + ' ' + pos.instrument)}  "
+            f"{kind_icon} {_b(label)} [{account_id}] \u2014 {pos.strategy_id}",
+            f"{dir_icon} {_b(pos.direction.value + ' ' + pos.instrument)}  "
             f"{pos.lots:.2f} lots @ {_code(f'{pos.entry_price:.5g}')}",
             f"SL {_code(f'{plan.stop_loss:.5g}')} | TP {_code(tps)} | "
             f"RR {plan.max_rr:.2f}",
@@ -339,9 +356,10 @@ class CFDTradeNotifier:
             hold_min = max(0.0, (pos.exit_time_ms - pos.entry_time_ms) / 60_000.0)
 
         exit_label = f"{kind.upper()} EXIT"
+        dir_icon = _ENTRY_ICON.get(pos.direction.value, "")
         lines = [
             f"{emoji} {_b(exit_label)} [{account_id}] \u2014 {_b(verdict)} \u2014 {strategy_id}",
-            f"{pos.direction.value} {pos.instrument} @ {_code(f'{pos.exit_price:.5g}')} "
+            f"{dir_icon} {pos.direction.value} {pos.instrument} @ {_code(f'{pos.exit_price:.5g}')} "
             f"({reason_icon} {reason.value})",
             f"Entry {_code(f'{pos.entry_price:.5g}')} \u2192 "
             f"Exit {_code(f'{pos.exit_price:.5g}')} | {_i(f'hold {hold_min:.0f}m')}",
@@ -434,7 +452,7 @@ class CFDTradeNotifier:
 
     def periodic_summary(self, summaries: list[dict], sessions: str = "") -> None:
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        lines = ["\u2550" * 24, _b(f"\U0001f4ca PORTFOLIO \u2014 {now}"), "\u2550" * 24]
+        lines = ["\u2550" * 24, _b(f"\U0001f4ca {ENGINE_NAME} PORTFOLIO \u2014 {now}"), "\u2550" * 24]
         if sessions:
             lines.append(_i(sessions))
         lines.append("")
@@ -531,7 +549,7 @@ class CFDTradeNotifier:
         )
         lines = [
             "\u2550" * 24,
-            _b("\U0001f7e2 CFD PAPER TRADER STARTED"),
+            _b(f"\U0001f680 {ENGINE_NAME} — TRADING STARTED"),
             "\u2550" * 24,
             f"Accounts: {accts or 'none'}",
             f"Strategies: {', '.join(strategies) or '(none)'}",
@@ -553,7 +571,7 @@ class CFDTradeNotifier:
             trades_by_acct = {aid: d.trades for aid, d in self._days.items()}
         lines = [
             "\u2550" * 24,
-            _b("\U0001f534 CFD PAPER TRADER STOPPED"),
+            _b(f"\u23f9\ufe0f {ENGINE_NAME} — TRADING STOPPED"),
             "\u2550" * 24,
             f"Session: {dur_min:.0f} min",
         ]
