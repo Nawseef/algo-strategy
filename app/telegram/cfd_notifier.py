@@ -401,7 +401,7 @@ class CFDTradeNotifier:
         if mfe_line:
             lines.append(_i(mfe_line))
 
-        lines.append("\u2500" * 13)
+        lines.append("\u2500" * 20)
         # Per-STRATEGY stats (this is what "last 7 trades" / streak means when
         # more than one strategy trades the same account).
         lines.append(
@@ -413,7 +413,7 @@ class CFDTradeNotifier:
         if strat_streak:
             lines.append(_i(f"Streak: {strat_streak}"))
 
-        lines.append("\u2500" * 13)
+        lines.append("\u2500" * 20)
         # Per-ACCOUNT stats (balance/day PnL/DD are account-wide, across ALL
         # strategies trading it).
         day_pct = (day_realized / init_bal * 100.0) if init_bal else 0.0
@@ -472,7 +472,7 @@ class CFDTradeNotifier:
 
     def periodic_summary(self, summaries: list[dict], sessions: str = "") -> None:
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        lines = ["\u2550" * 24, _b(f"\U0001f4ca {ENGINE_NAME} PORTFOLIO \u2014 {now}"), "\u2550" * 24]
+        lines = ["\u2550" * 20, _b(f"\U0001f4ca {ENGINE_NAME} PORTFOLIO \u2014 {now}"), "\u2550" * 20]
         if sessions:
             lines.append(_i(sessions))
         lines.append("")
@@ -495,9 +495,9 @@ class CFDTradeNotifier:
             "\U0001f534 RED DAY" if portfolio_pnl < 0 else "\u26aa FLAT DAY")
 
         lines = [
-            "\u2550" * 24,
+            "\u2550" * 20,
             _b(f"\U0001f3c1 END OF DAY \u2014 {date_str}"),
-            "\u2550" * 24,
+            "\u2550" * 20,
             f"{_b(verdict)} (portfolio {_b(_signed(portfolio_pnl))})",
             "",
         ]
@@ -568,9 +568,9 @@ class CFDTradeNotifier:
             for s in summaries
         )
         lines = [
-            "\u2550" * 24,
+            "\u2550" * 20,
             _b(f"\U0001f680 {ENGINE_NAME} — TRADING STARTED"),
-            "\u2550" * 24,
+            "\u2550" * 20,
             f"Accounts: {accts or 'none'}",
             f"Strategies: {', '.join(strategies) or '(none)'}",
             f"Market: {_b('OPEN') if market_open else _b('CLOSED')} | {sessions or 'closed'}",
@@ -590,9 +590,9 @@ class CFDTradeNotifier:
             realized_by_acct = {aid: d.realized_pnl for aid, d in self._days.items()}
             trades_by_acct = {aid: d.trades for aid, d in self._days.items()}
         lines = [
-            "\u2550" * 24,
+            "\u2550" * 20,
             _b(f"\u23f9\ufe0f {ENGINE_NAME} — TRADING STOPPED"),
-            "\u2550" * 24,
+            "\u2550" * 20,
             f"Session: {dur_min:.0f} min",
         ]
         for s in summaries:
