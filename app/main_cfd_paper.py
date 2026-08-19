@@ -45,8 +45,19 @@ Configuration (env, all optional):
     CFD_PAPER_BALANCE           starting balance USD (default paper_trading.starting_balance)
     CFD_PAPER_RISK_PCT          risk per trade % (default 1.0)
     CFD_PAPER_ARCHIVE_CANDLES   archive candles to live_candles (default true)
-    CFD_PAPER_COST_MODEL        intraday | conservative | zero (default intraday)
+    CFD_PAPER_SUMMARY_MIN       periodic portfolio-summary cadence (min; 0 = off)
     (plus the FX_* flatten/session vars read by app.utils.forex_hours)
+
+Trading streams (paper / demo / live) are configured via app/cfd_execution/streams.py:
+    * A JSON file at $CFD_STREAMS_CONFIG (default data/cfd_streams.json if present)
+      lists many streams, each with its own kind, balance, risk, cost model,
+      enable toggle, and optional dedicated Telegram channel (per prop firm).
+    * Otherwise the legacy flat env vars are used:
+        CFD_PAPER_EXECUTION_MODE  paper | live | both (default paper)
+        CFD_PAPER_ACCOUNT_ID / CFD_DEMO_ACCOUNT_ID   stream labels
+        CFD_PAPER_COST_MODEL   (paper)  /  CFD_DEMO_COST_MODEL  (demo)
+    demo + live place REAL cTrader orders; their commission/swap are read from
+    cTrader's close deal (not modeled). Paper fills are simulated.
 
 Usage:
     python -m app.main_cfd_paper
@@ -63,13 +74,18 @@ from datetime import datetime, timezone
 
 from app.broker.base import Instrument, Tick
 from app.broker.ctrader import CTraderBroker, CTraderFeedClient
+from app.broker.ctrader_backfill import backfill_candles
 from app.broker.mt5 import MT5Broker, MT5FeedClient
 from app.cfd_execution.account import AccountConfig, PropFirmRules
 from app.cfd_execution.base import ExitReason
+from app.cfd_execution.ctrader_executor import CTraderExecutor
 from app.cfd_execution.multi_account import MultiAccountManager
+from app.cfd_execution.paper_executor import PaperExecutor
+from app.cfd_execution.streams import StreamConfig, load_streams
 from app.cfd_risk.costs import (
     COST_MODEL_CONSERVATIVE,
     COST_MODEL_INTRADAY,
+    COST_MODEL_RAW,
     COST_MODEL_ZERO,
 )
 from app.cfd_strategy.base import CFDStrategy, StrategyContext
@@ -100,7 +116,8 @@ _SESSION_LABEL = {
 _COST_MODELS = {
     "intraday": COST_MODEL_INTRADAY,
     "conservative": COST_MODEL_CONSERVATIVE,
-    "zero": COST_MODEL_ZERO,
+    "zero": COST_MODEL_ZERO,      # spread/slippage/swap off, commission STILL charged
+    "raw": COST_MODEL_RAW,        # truly no cost: spread, commission, slippage, swap all 0
 }
 
 # How many bars of history to seed each instrument with on startup, on top of
@@ -160,6 +177,9 @@ class CFDPaperTradingApp:
                 # Surface dead-token / lost-subscription / reconnect events to
                 # Telegram (notifier is built just below; resolved at call time).
                 alert_cb=lambda m: self._notifier.send(m),
+                # On reconnect, self-heal the candle archive for the gap the
+                # push feed missed while disconnected (awaited on the loop).
+                reconnect_backfill=lambda: self._backfill_ctrader("reconnect"),
             )
         else:
             self._feed_cfg = self._config.mt5
@@ -176,6 +196,18 @@ class CFDPaperTradingApp:
         # ── Storage + alerts (dedicated CFD channel; never the NSE bot). ──
         self._store = store if store is not None else ResearchStore()
         self._archive_candles = _env_bool("CFD_PAPER_ARCHIVE_CANDLES", True)
+        # Max span (days) the cTrader candle backfill will fill in one pass;
+        # a longer outage's older gap is left for a dedicated history job.
+        self._backfill_max_days = _env_float("CFD_BACKFILL_MAX_DAYS", 3.0)
+        # Pause between historical requests during backfill (cTrader rate-limits
+        # get_trendbars; a rapid 10-symbol burst gets throttled).
+        self._backfill_pause_s = _env_float("CFD_BACKFILL_PAUSE_S", 1.0)
+        # Minimum window each backfill scans (fills recent interior holes, not
+        # just a trailing gap), and a debounce so a reconnect flap can't hammer
+        # the historical API.
+        self._backfill_lookback_h = _env_float("CFD_BACKFILL_LOOKBACK_H", 6.0)
+        self._backfill_min_interval_s = _env_float("CFD_BACKFILL_MIN_INTERVAL_S", 90.0)
+        self._last_backfill_monotonic = 0.0
         self._use_staging = _env_bool("CFD_CTRADER_STAGING", self._feed_kind == "ctrader")
         self._candle_store = LiveCandleStore(
             self._store, use_staging=self._use_staging
@@ -195,15 +227,58 @@ class CFDPaperTradingApp:
         self._summary_interval_s = max(0.0, _env_float("CFD_PAPER_SUMMARY_MIN", 30.0)) * 60.0
         self._last_summary_ts = 0.0
 
-        # ── Trading account(s) + executor. ──
-        cost_model = _COST_MODELS.get(
-            _env("CFD_PAPER_COST_MODEL", "intraday").lower(), COST_MODEL_INTRADAY
-        )
-        self._manager = MultiAccountManager(
-            store=self._store, notifier=self._notifier, cost_model=cost_model,
-        )
-        self._account = self._build_account()
-        self._manager.add_account(self._account)
+        # ── Trading streams (paper / demo / live), config-driven. ──
+        # Each stream is an independent account fed the SAME signals, with its own
+        # executor, balance, RiskGuard, alert channel, and PAPER/DEMO/LIVE label.
+        # Toggle any on/off in the streams config (see app/cfd_execution/streams.py).
+        self._streams = load_streams()
+        self._manager = MultiAccountManager(store=self._store)
+
+        order_placing = [s for s in self._streams if s.places_orders]
+        if order_placing and self._feed_kind != "ctrader":
+            raise RuntimeError(
+                f"stream(s) {[s.stream_id for s in order_placing]} place real orders "
+                "and require feed='ctrader' (MT5 has no order-placement path). "
+                "Use app.main_ctrader, or disable those streams."
+            )
+
+        # Per-stream notifier: a stream with its own Telegram creds gets its own
+        # channel; otherwise it shares the default CFD channel. Cached so several
+        # streams with the same creds reuse one transport.
+        self._default_notifier = self._notifier
+        self._stream_notifiers: dict[str, object] = {}
+        self._accounts: dict[str, AccountConfig] = {}
+        self._own_channel_cache: dict[tuple[str, str], object] = {}
+        for s in self._streams:
+            self._stream_notifiers[s.stream_id] = self._notifier_for(s)
+            self._accounts[s.stream_id] = self._build_account(
+                s.stream_id, balance=s.balance, risk_pct=s.risk_pct,
+                ctrader_account_id=s.ctrader_account_id,
+            )
+
+        # PAPER streams get their PaperExecutor now. DEMO/LIVE streams place real
+        # orders and need the AUTHENTICATED broker, so they are built in start().
+        for s in self._streams:
+            if s.is_paper:
+                ex = PaperExecutor(
+                    self._accounts[s.stream_id], store=self._store,
+                    notifier=self._stream_notifiers[s.stream_id],
+                    cost_model=_COST_MODELS.get(s.cost_model.lower(), COST_MODEL_INTRADAY),
+                    kind=s.kind,
+                )
+                self._manager.add_executor(ex)
+        self._order_streams = order_placing  # built in start()
+        if order_placing:
+            logger.warning(
+                "REAL-ORDER streams enabled: %s (env=%s). These place actual "
+                "cTrader orders — not a simulation.",
+                [s.stream_id for s in order_placing], self._config.ctrader.env,
+            )
+
+        # Representative account for logging + flatten policy (rules are shared
+        # across streams). Falls back to a throwaway if somehow no streams.
+        self._account = (self._accounts[self._streams[0].stream_id]
+                         if self._streams else self._build_account("cfd_demo"))
         # Cache the flatten policy for the schedule monitor + entry gating.
         self._flatten_weekend = self._account.rules.flatten_before_weekend
         self._flatten_reset = self._account.rules.flatten_before_daily_reset
@@ -229,22 +304,64 @@ class CFDPaperTradingApp:
 
     # ─── Setup helpers ───────────────────────────────────────────
 
-    def _build_account(self) -> AccountConfig:
-        account_id = _env("CFD_PAPER_ACCOUNT_ID", "cfd_demo")
-        balance = _env_float("CFD_PAPER_BALANCE", self._config.paper_trading.starting_balance)
-        risk_pct = _env_float("CFD_PAPER_RISK_PCT", 1.0)
-        # Generic prop-firm rules are a safe default for a demo paper account:
-        # 5% daily / 10% max drawdown, flatten before the weekend gap.
+    def _build_account(
+        self,
+        account_id: str,
+        balance: float | None = None,
+        risk_pct: float | None = None,
+        ctrader_account_id: int = 0,
+    ) -> AccountConfig:
+        if balance is None:
+            balance = _env_float("CFD_PAPER_BALANCE", self._config.paper_trading.starting_balance)
+        if risk_pct is None:
+            risk_pct = _env_float("CFD_PAPER_RISK_PCT", 1.0)
+        # Generic prop-firm rules: 5% daily / 10% max drawdown, flatten before
+        # the weekend gap. flatten_before_daily_reset defaults ON so live matches
+        # the INTRADAY backtest — the research force-flattens each trade at the FX
+        # trading-day boundary (17:00 NY), so live must too (otherwise an ORB
+        # trade that never hits SL/TP would ride overnight, diverging from the
+        # backtest). Disable with CFD_INTRADAY_FLATTEN=false for a swing strategy.
+        intraday_flatten = _env_bool("CFD_INTRADAY_FLATTEN", True)
         rules = PropFirmRules(
             firm_name="paper_demo",
             max_risk_per_trade_pct=risk_pct,
+            flatten_before_daily_reset=intraday_flatten,
         )
         return AccountConfig(
             account_id=account_id,
             initial_balance=balance,
             rules=rules,
             risk_per_trade_pct=risk_pct,
+            ctrader_account_id=ctrader_account_id,
         )
+
+    def _notifier_for(self, stream: StreamConfig):
+        """Return the notifier a stream should use: its own dedicated Telegram
+        channel if configured, otherwise the shared default CFD channel. Streams
+        sharing identical creds reuse one transport (cached)."""
+        if not stream.has_own_channel:
+            return self._default_notifier
+        key = (stream.telegram_bot_token, stream.telegram_chat_id)
+        cached = self._own_channel_cache.get(key)
+        if cached is None:
+            transport = MT5Notifier(stream.telegram_bot_token, [stream.telegram_chat_id])
+            cached = CFDTradeNotifier(transport)
+            self._own_channel_cache[key] = cached
+        return cached
+
+    def _notifier_groups(self) -> list[tuple[object, list[str]]]:
+        """Distinct notifiers paired with the account ids that report to them —
+        so portfolio/EOD/session messages go to each channel with only its own
+        accounts."""
+        groups: dict[int, tuple[object, list[str]]] = {}
+        for s in self._streams:
+            n = self._stream_notifiers[s.stream_id]
+            groups.setdefault(id(n), (n, []))[1].append(s.stream_id)
+        return list(groups.values())
+
+    def _summaries_for(self, account_ids: list[str]) -> list[dict]:
+        ids = set(account_ids)
+        return [s for s in self._manager.summaries() if s.get("account_id") in ids]
 
     def _load_strategies(self) -> list[CFDStrategy]:
         """Select which registered strategies to run (all, or a filtered set)."""
@@ -305,6 +422,26 @@ class CFDPaperTradingApp:
         # static table (catches e.g. silver 5000 vs the broker's real 1000).
         self._sync_instrument_specs()
 
+        # DEMO / LIVE streams: build their CTraderExecutor now that the broker is
+        # authenticated (they need a live client to place orders), and register
+        # each one's execution-event handler on the broker's loop. These run
+        # ALONGSIDE any paper streams on the same signals. Real commission/swap
+        # are read from cTrader's close deal — the cost_model is only a fallback.
+        for s in self._order_streams:
+            ex = CTraderExecutor(
+                self._accounts[s.stream_id], broker=self._broker, store=self._store,
+                notifier=self._stream_notifiers[s.stream_id],
+                cost_model=_COST_MODELS.get(s.cost_model.lower(), COST_MODEL_ZERO),
+                kind=s.kind,
+            )
+            ex.start()
+            self._manager.add_executor(ex)
+            logger.warning(
+                "%s executor armed for account '%s' — signals will place REAL "
+                "cTrader orders (server-side SL, managed exits).",
+                s.kind.upper(), s.stream_id,
+            )
+
         symbols = list(self._feed_cfg.symbols)
         if self._feed_kind == "ctrader":
             # Only trade symbols that resolved to a cTrader id on connect.
@@ -331,12 +468,13 @@ class CFDPaperTradingApp:
 
         st = forex_hours.status()
         logger.info("=" * 64)
-        logger.info("CFD PAPER TRADER — feed -> 5m candles -> strategies -> paper executor")
-        logger.info("Account: %s | balance $%.2f | risk/trade %.2f%%",
-                    self._account.account_id, self._account.initial_balance,
-                    self._account.effective_risk_per_trade_pct())
+        logger.info("CFD TRADER — feed -> 5m candles -> strategies -> executors")
+        for s in self._streams:
+            logger.info("  stream '%s' [%s] balance $%.0f risk %.2f%% -> %s",
+                        s.stream_id, s.kind.upper(), s.balance, s.risk_pct,
+                        "own channel" if s.has_own_channel else "shared channel")
         logger.info("Strategies: %s",
-                    ", ".join(s.strategy_id for s in self._strategies) or "(none)")
+                    ", ".join(x.strategy_id for x in self._strategies) or "(none)")
         logger.info("Feed: %s | Symbols: %s", self._feed_kind, ", ".join(symbols))
         logger.info("Archive candles: %s | store: %s",
                     self._archive_candles,
@@ -352,12 +490,15 @@ class CFDPaperTradingApp:
         self._last_sessions = set(st["active_sessions"])
         self._last_trading_day = forex_hours.trading_day()
         sess = ", ".join(_SESSION_LABEL.get(s, s) for s in st["active_sessions"]) or "none"
-        self._notifier.session_start(
-            self._manager.summaries(),
-            [s.strategy_id for s in self._strategies],
-            bool(st["market_open"]),
-            sess,
-        )
+        strat_ids = [x.strategy_id for x in self._strategies]
+        # Each channel gets a session-start banner listing ONLY its own streams,
+        # tagged live if any of them place real orders.
+        for notifier, acct_ids in self._notifier_groups():
+            live = any(s.places_orders for s in self._streams if s.stream_id in acct_ids)
+            notifier.session_start(
+                self._summaries_for(acct_ids), strat_ids,
+                bool(st["market_open"]), sess, live=live,
+            )
         self._start_monitor()
 
     def _wire_pipeline(self) -> None:
@@ -462,13 +603,14 @@ class CFDPaperTradingApp:
         entries_blocked = self._entries_blocked()
 
         for strat in self._strategies:
-            if strat.timeframe is not Timeframe.M5:
-                continue
             if not strat.applies_to(instrument):
                 continue
             if len(history) < strat.min_history:
                 continue
 
+            # All strategies receive the 5m history. Strategies on higher
+            # timeframes (M15, M30, H1) aggregate internally and only act when
+            # their HTF bar closes — see e.g. usdjpy_orb._evaluate_htf().
             ctx = StrategyContext(
                 instrument=instrument,
                 timeframe=strat.timeframe,
@@ -566,11 +708,12 @@ class CFDPaperTradingApp:
         # FX trading-day boundary -> send EOD report, reset strategies + tally.
         td = forex_hours.trading_day()
         if self._last_trading_day is not None and td != self._last_trading_day:
-            try:
-                self._notifier.eod_report(self._manager.summaries(), self._last_trading_day)
-            except Exception as e:  # noqa: BLE001
-                logger.error("EOD report failed: %s", e)
-            self._notifier.on_day_reset()          # clear the notifier's day tally
+            for notifier, acct_ids in self._notifier_groups():
+                try:
+                    notifier.eod_report(self._summaries_for(acct_ids), self._last_trading_day)
+                    notifier.on_day_reset()        # clear that channel's day tally
+                except Exception as e:  # noqa: BLE001
+                    logger.error("EOD report failed: %s", e)
             for s in self._strategies:
                 try:
                     s.on_day_reset()
@@ -583,11 +726,12 @@ class CFDPaperTradingApp:
             now_s = time.time()
             if now_s - self._last_summary_ts >= self._summary_interval_s:
                 self._last_summary_ts = now_s
-                try:
-                    sessions = "+".join(forex_hours.active_sessions()) or "closed"
-                    self._notifier.periodic_summary(self._manager.summaries(), sessions)
-                except Exception as e:  # noqa: BLE001
-                    logger.error("periodic summary failed: %s", e)
+                sessions = "+".join(forex_hours.active_sessions()) or "closed"
+                for notifier, acct_ids in self._notifier_groups():
+                    try:
+                        notifier.periodic_summary(self._summaries_for(acct_ids), sessions)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error("periodic summary failed: %s", e)
 
         # Weekend flatten: fire once when we enter the pre-close window; re-arm
         # after the market closes for the weekend.
@@ -689,9 +833,22 @@ class CFDPaperTradingApp:
         archived candle series (and strategy history) stays gapless across
         consumer downtime.
         """
-        # Backfill is MT5-specific (replays missed ticks from the feed VM's
-        # history). cTrader is push-only with no equivalent, and warmup already
-        # seeds history from stored candles — so it's a no-op for other feeds.
+        # cTrader (push feed) has its own trendbar-based backfill: on startup we
+        # drive it synchronously on the (idle) broker loop; on reconnect the feed
+        # awaits it. This fills the candle archive for any gap the push feed
+        # missed while the process/connection was down.
+        if self._feed_kind == "ctrader":
+            if self._startup_backfill_done or self._candle_store is None:
+                self._startup_backfill_done = True
+                return
+            try:
+                self._broker.loop.run_until_complete(self._backfill_ctrader("startup"))
+            except Exception as e:  # noqa: BLE001 - never block startup on backfill
+                logger.error("cTrader startup backfill failed: %s", e)
+            self._startup_backfill_done = True
+            return
+        # Backfill below is MT5-specific (replays missed ticks from the feed VM's
+        # history). Warmup already seeds strategy history from stored candles.
         if self._feed_kind != "mt5":
             self._startup_backfill_done = True
             return
@@ -720,6 +877,39 @@ class CFDPaperTradingApp:
             logger.info("Backfill: no prior candles (fresh start) — skipping")
         self._startup_backfill_done = True
 
+    async def _backfill_ctrader(self, reason: str) -> None:
+        """Fill the cTrader candle-archive gap (startup or on reconnect).
+
+        Archive-only: writes finished trendbars straight to the store (idempotent,
+        session-tagged) without emitting on the EventBus, so no strategy eval /
+        order management runs on backfilled history. Runs on the broker loop.
+        """
+        if self._candle_store is None:
+            return
+        # Debounce: a reconnect flap can fire many ReconnectedEvents in minutes;
+        # don't re-scan the historical API more than once per interval.
+        mono = time.monotonic()
+        if mono - self._last_backfill_monotonic < self._backfill_min_interval_s:
+            logger.info("cTrader %s backfill skipped (debounced)", reason)
+            return
+        self._last_backfill_monotonic = mono
+
+        resolved = getattr(self._broker, "symbol_map", {})
+        symbols = [s for s in self._feed_cfg.symbols if s in resolved]
+        if not symbols:
+            return
+        try:
+            n = await backfill_candles(
+                self._broker, self._store, self._candle_store, symbols,
+                exchange=self._feed_cfg.exchange, segment=self._feed_cfg.segment,
+                timeframe=Timeframe.M5, use_staging=self._use_staging,
+                min_lookback_hours=self._backfill_lookback_h,
+                max_days=self._backfill_max_days, request_pause_s=self._backfill_pause_s,
+            )
+            logger.info("cTrader %s backfill wrote %d candle(s)", reason, n)
+        except Exception as e:  # noqa: BLE001 - a backfill failure must not crash the feed
+            logger.error("cTrader %s backfill error: %s", reason, e)
+
     # ─── Run / shutdown ──────────────────────────────────────────
 
     def run(self) -> None:
@@ -735,10 +925,11 @@ class CFDPaperTradingApp:
                 logger.error("flatten on shutdown failed: %s", e)
             self._feed.stop()
             self._log_stats()
-            try:
-                self._notifier.session_end(self._manager.summaries())
-            except Exception as e:  # noqa: BLE001
-                logger.error("session_end alert failed: %s", e)
+            for notifier, acct_ids in self._notifier_groups():
+                try:
+                    notifier.session_end(self._summaries_for(acct_ids))
+                except Exception as e:  # noqa: BLE001
+                    logger.error("session_end alert failed: %s", e)
             self._store.stop()
             sys.exit(0)
 

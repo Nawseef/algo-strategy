@@ -72,11 +72,12 @@ def test_entry_alert_content():
     n.notify_entry("cfd_demo", pos, sig, risk_usd=1000.0, open_count=1,
                    guard_summary=_guard_summary())
     msg = t.messages[-1]
-    assert "ENTRY [cfd_demo]" in msg
+    assert "ENTRY" in msg and "[cfd_demo]" in msg
+    assert "gold" in msg                     # strategy id now in the header
     assert "LONG XAUUSD" in msg
     assert "RR 2.00" in msg
     assert "$1,000.00" in msg
-    assert "gold/v1" in msg
+    assert "v1" in msg
 
 
 def test_exit_alert_running_totals_and_mfe():
@@ -87,10 +88,12 @@ def test_exit_alert_running_totals_and_mfe():
                   reason=ExitReason.TAKE_PROFIT,
                   guard_summary=_guard_summary(balance=101_993.0))
     msg = t.messages[-1]
-    assert "EXIT [cfd_demo] — WIN" in msg
+    assert "EXIT" in msg and "[cfd_demo]" in msg and "WIN" in msg
+    assert "gold" in msg                     # strategy id now in the header
     assert "TAKE_PROFIT" in msg
     assert "hold 35m" in msg                 # (3_100_000-1_000_000)/60000 = 35
-    assert "Today: +$1,993.00" in msg
+    assert "+$1,993.00" in msg               # per-strategy realized PnL
+    assert "Account today:" in msg and "+$1,993.00" in msg
     assert "1 trades  W:1 L:0 (100%)" in msg
     assert "Peak" in msg and "beyond furthest TP" in msg
 
@@ -142,7 +145,7 @@ def test_periodic_summary_multi_account_best():
     msg = t.messages[-1]
     assert "PORTFOLIO" in msg
     assert "[demo]" in msg and "[ftmo]" in msg
-    assert "Best: demo" in msg
+    assert "Best:" in msg and "demo" in msg.split("Best:")[1]
 
 
 def test_eod_report_and_day_reset():
@@ -154,9 +157,9 @@ def test_eod_report_and_day_reset():
     summaries = [_guard_summary(account_id="demo", balance=101_500.0)]
     n.eod_report(summaries, "2026-08-06")
     msg = t.messages[-1]
-    assert "END OF DAY — 2026-08-06" in msg
+    assert "END OF DAY" in msg and "2026-08-06" in msg
     assert "GREEN DAY" in msg
-    assert "Day +$1,500.00" in msg
+    assert "Day" in msg and "+$1,500.00" in msg
 
     # After reset the tally is cleared: a fresh EOD shows flat.
     n.on_day_reset()

@@ -328,6 +328,12 @@ class BaseExecutor(ABC):
 
     mode: ExecutionMode = ExecutionMode.PAPER
 
+    @property
+    @abstractmethod
+    def account_id(self) -> str:
+        """The account label this executor manages."""
+        ...
+
     @abstractmethod
     def on_signal(self, signal: CFDSignal) -> None:
         """Handle a new strategy signal (open or arm a position)."""

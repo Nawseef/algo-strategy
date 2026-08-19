@@ -80,6 +80,7 @@ class CTraderExecutor(BaseExecutor):
         notifier=None,
         cost_model: CFDCostModel | None = None,
         alert_trades: bool = True,
+        kind: str = "demo",
     ) -> None:
         self._account = account
         self._broker = broker
@@ -87,6 +88,10 @@ class CTraderExecutor(BaseExecutor):
         self._notifier = notifier
         self._cost_model = cost_model or COST_MODEL_INTRADAY
         self._alert_trades = alert_trades
+        # Alert label / behaviour tag: "demo" (real orders on a demo account) or
+        # "live" (real orders on a funded/prop account). Both place real orders;
+        # this only changes how the alert is titled (DEMO ENTRY vs LIVE ENTRY).
+        self._kind = kind
 
         self._risk = RiskGuard(account.to_risk_guard_config())
         self._risk_pct = account.effective_risk_per_trade_pct()
@@ -106,10 +111,16 @@ class CTraderExecutor(BaseExecutor):
         self._arms: dict[tuple[str, str, str, str], tuple[CFDSignal, int]] = {}
         self._last_price: dict[str, float] = {}
         self._risk_stash: dict[int, float] = {}       # entry risk_usd for the entry alert
+        self._intended_entry: dict[int, float] = {}   # signal price (to show fill slippage)
 
         self._trades_opened = 0
         self._trades_closed = 0
         self._started = False
+        # The REAL account balance, tracked from cTrader (seeded at start() from
+        # the live account, updated from each close deal's CloseDetail.balance).
+        # Net PnL is booked as the balance DELTA, which is authoritative and
+        # sidesteps any commission/swap sign convention.
+        self._last_real_balance: float | None = None
 
     # ─── Properties ──────────────────────────────────────────────
 
@@ -136,12 +147,44 @@ class CTraderExecutor(BaseExecutor):
         @client.on(ExecutionEvent, account_id=acct_id)
         async def _on_exec(event) -> None:  # runs on the broker loop
             try:
-                self._handle_execution(event)
+                to_finalize = self._handle_execution(event)
+                if to_finalize is not None:
+                    # Fully closed — fetch the REAL close accounting (commission,
+                    # swap, gross) from cTrader before finalising, then book it.
+                    await self._finalize_async(*to_finalize)
             except Exception as e:  # noqa: BLE001
                 logger.error("[%s] execution reconcile error: %s", self.account_id, e)
 
+        # Seed the RiskGuard with the REAL account balance so risk-% sizing is a
+        # % of what the account ACTUALLY has (e.g. 0.5% of a real $8,143 demo
+        # balance, not a configured $100k). Falls back to the configured balance
+        # if the fetch fails.
+        info = None
+        try:
+            info = self._broker.get_account_info()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] account-info fetch failed: %s", self.account_id, e)
+        if info and info.get("balance") is not None:
+            real_bal = float(info["balance"])
+            self._risk.reset_account(real_bal)
+            self._last_real_balance = real_bal
+            lev = info.get("leverage")
+            logger.info(
+                "[%s] REAL account balance $%.2f seeded (leverage %s, %s) — "
+                "risk %.2f%%/trade sizes off THIS balance",
+                self.account_id, real_bal,
+                f"1:{lev:.0f}" if lev else "?", info.get("broker_name") or "",
+                self._risk_pct,
+            )
+        else:
+            logger.warning(
+                "[%s] could not read real balance — using configured $%.2f for sizing",
+                self.account_id, self._risk.balance,
+            )
+
         self._started = True
-        logger.info("[%s] CTraderExecutor started (LIVE order routing armed)", self.account_id)
+        logger.info("[%s] CTraderExecutor started (%s order routing armed)",
+                    self.account_id, self._kind.upper())
 
     # ─── Signal handling ─────────────────────────────────────────
 
@@ -302,6 +345,7 @@ class CTraderExecutor(BaseExecutor):
         self._server_tp[pos_id] = server_tp
         self._tp_requested[pos_id] = set()
         self._risk_stash[pos_id] = risk_usd
+        self._intended_entry[pos_id] = float(signal.entry_price)
         self._open_keys[(signal.strategy_id, signal.variant_id, signal.instrument, signal.direction.value)] = pos_id
         self._trades_opened += 1
         logger.info("[%s] LIVE ORDER placed %s %s %.2f lots (vol %d) SL=%.5g TP=%s managed=%s pos=%s",
@@ -456,7 +500,10 @@ class CTraderExecutor(BaseExecutor):
                     self.account_id, frac * 100, fill, reason.value, pos_id, pos.remaining_fraction)
 
         if pos.remaining_fraction <= 1e-6:
-            self._finalize(pos_id, pos)
+            # Signal the caller (_on_exec) to finalise asynchronously so it can
+            # await the real close-deal accounting from cTrader.
+            return (pos_id, pos)
+        return None
 
     def _classify_close(self, pos: ManagedPosition, price: float) -> ExitReason:
         sign = pos.direction.sign
@@ -470,7 +517,85 @@ class CTraderExecutor(BaseExecutor):
                 return ExitReason.TAKE_PROFIT
         return ExitReason.MANUAL
 
-    def _finalize(self, pos_id: int, pos: ManagedPosition) -> None:
+    async def _finalize_async(self, pos_id: int, pos: ManagedPosition) -> None:
+        """Fetch the REAL close accounting from cTrader, then book the close.
+
+        The authoritative commission / swap / gross-profit for the trade live on
+        the closing deal(s) (``Deal.close_detail``), NOT on the ORDER_FILLED
+        event — so we query them here (by position id) and report the broker's
+        real numbers. Falls back to the modeled cost model if the deals can't be
+        fetched (network / timing), so a close is never lost."""
+        real = await self._fetch_real_costs(pos_id)
+        self._finalize(pos_id, pos, real=real)
+
+    async def _fetch_real_costs(self, pos_id: int) -> dict | None:
+        """Return the real close accounting for a position, or None to fall back.
+
+        Aggregates every closing deal's ``CloseDetail`` (gross profit, swap,
+        commission, pnl-conversion fee — all already in USD deposit currency) plus
+        the commission booked on the OPENING deal(s), so the reported cost is the
+        full round-trip the broker actually charged.
+        """
+        trading = getattr(self._broker.client, "trading", None)
+        if trading is None or not hasattr(trading, "get_deals_by_position_id"):
+            return None
+
+        # The closing deal can lag the ORDER_FILLED event by a moment, so retry
+        # a few times until a deal carrying a close_detail shows up.
+        gross = swap = close_comm = conv = 0.0
+        open_comm = 0.0
+        balance = None
+        found_close = False
+        for attempt in range(4):
+            try:
+                deals = await trading.get_deals_by_position_id(self._broker.account_id, pos_id)
+            except Exception as e:  # noqa: BLE001 - never let a reporting fetch break a close
+                logger.warning("[%s] could not fetch deals for pos %s (%s) — using modeled cost",
+                               self.account_id, pos_id, e)
+                return None
+
+            gross = swap = close_comm = conv = 0.0
+            open_comm = 0.0
+            balance = None
+            found_close = False
+            for d in deals or []:
+                cd = getattr(d, "close_detail", None)
+                if cd is not None:
+                    found_close = True
+                    gross += float(cd.gross_profit)
+                    swap += float(cd.swap)
+                    close_comm += float(cd.commission)
+                    conv += float(cd.pnl_conversion_fee)
+                    balance = float(cd.balance)
+                else:
+                    # Opening deal: its commission is the entry-leg charge.
+                    open_comm += float(getattr(d, "commission", 0) or 0)
+            if found_close:
+                break
+            await asyncio.sleep(0.4)
+
+        if not found_close:
+            logger.warning("[%s] no closing deal found for pos %s after retries — "
+                           "using modeled cost", self.account_id, pos_id)
+            return None
+
+        commission = close_comm + open_comm          # full round-trip commission (broker-signed)
+        net = gross + swap + commission - conv        # cTrader signs charges negative
+        # Loud, one-time-per-trade log of the raw broker numbers so the FIRST real
+        # demo trades can be sanity-checked against the cTrader statement (sign /
+        # scope conventions differ per broker entity).
+        logger.info(
+            "[%s] REAL close accounting pos=%s: gross=%.2f swap=%.2f "
+            "commission=%.2f (close=%.2f open=%.2f) convFee=%.2f -> net=%.2f bal=%s",
+            self.account_id, pos_id, gross, swap, commission, close_comm, open_comm,
+            conv, net, f"{balance:.2f}" if balance is not None else "?",
+        )
+        return {
+            "gross": gross, "swap": swap, "commission": commission,
+            "conv_fee": conv, "net": net, "balance": balance,
+        }
+
+    def _finalize(self, pos_id: int, pos: ManagedPosition, real: dict | None = None) -> None:
         pos.status = PositionStatus.CLOSED
         legs = pos.partial_closes
         pos.exit_price = legs[-1].price if legs else pos.entry_price
@@ -481,26 +606,52 @@ class CTraderExecutor(BaseExecutor):
         inst = get_instrument(pos.instrument)
         pnl_price_weighted = sum(pc.pnl_price * pc.fraction for pc in legs)
         realized_rr = sum(pc.rr * pc.fraction for pc in legs)
-        pnl_usd = pnl_price_weighted * inst.point_value_per_lot * pos.lots
-        cost = calculate_trade_cost(symbol=pos.instrument, lot_size=pos.lots,
-                                    cost_model=self._cost_model, instrument=inst)
-        net_pnl_usd = pnl_usd - cost.total_usd
+
+        if real is not None:
+            # REAL broker accounting — no modeling. Prefer the account-balance
+            # DELTA as the authoritative net PnL (it can't be wrong about signs);
+            # fall back to the component sum if a balance wasn't returned.
+            gross_usd = real["gross"]
+            commission_usd = real["commission"]
+            swap_usd = real["swap"]
+            real_bal = real.get("balance")
+            if real_bal is not None and self._last_real_balance is not None:
+                net_pnl_usd = real_bal - self._last_real_balance
+            else:
+                net_pnl_usd = real["net"]
+            if real_bal is not None:
+                self._last_real_balance = real_bal
+            # Total charges as a positive number for display/persistence.
+            cost_usd = gross_usd - net_pnl_usd
+        else:
+            # Fallback: modeled cost (used only if the deal fetch failed).
+            gross_usd = pnl_price_weighted * inst.point_value_per_lot * pos.lots
+            cost = calculate_trade_cost(symbol=pos.instrument, lot_size=pos.lots,
+                                        cost_model=self._cost_model, instrument=inst)
+            cost_usd = cost.total_usd
+            net_pnl_usd = gross_usd - cost_usd
+            commission_usd = -cost.commission_usd
+            swap_usd = -cost.swap_usd
+
         self._risk.add_realized_pnl(net_pnl_usd)
 
         # Cleanup all per-position state.
         key = (pos.strategy_id, pos.variant_id, pos.instrument, pos.direction.value)
         for d in (self._positions, self._open_order_id, self._entry_volume, self._client_managed,
-                  self._server_tp, self._tp_requested, self._amend_last, self._risk_stash):
+                  self._server_tp, self._tp_requested, self._amend_last, self._risk_stash,
+                  self._intended_entry):
             d.pop(pos_id, None)
         self._closing_full.discard(pos_id)
         self._open_keys.pop(key, None)
         self._trades_closed += 1
 
-        logger.info("[%s] LIVE CLOSE %s %s @ %.5g | %s | RR=%.2f netPnL=$%.2f bal=$%.2f",
-                    self.account_id, pos.direction.value, pos.instrument, pos.exit_price,
+        src = "REAL" if real is not None else "modeled"
+        logger.info("[%s] %s CLOSE %s %s @ %.5g | %s | RR=%.2f netPnL=$%.2f bal=$%.2f",
+                    self.account_id, src, pos.direction.value, pos.instrument, pos.exit_price,
                     pos.final_reason.value, realized_rr, net_pnl_usd, self._risk.balance)
-        self._persist_trade(pos, realized_rr, pnl_price_weighted, pnl_usd, cost.total_usd, net_pnl_usd)
-        self._notify_exit(pos, realized_rr, net_pnl_usd, pos.final_reason)
+        self._persist_trade(pos, realized_rr, pnl_price_weighted, gross_usd, cost_usd, net_pnl_usd)
+        self._notify_exit(pos, realized_rr, net_pnl_usd, pos.final_reason,
+                          commission_usd=commission_usd, swap_usd=swap_usd)
 
     # ─── BaseExecutor interface ──────────────────────────────────
 
@@ -547,20 +698,40 @@ class CTraderExecutor(BaseExecutor):
     def _notify_entry(self, pos: ManagedPosition) -> None:
         if not (self._notifier and self._alert_trades):
             return
-        risk_usd = self._risk_stash.get(int(pos.position_id), 0.0)
+        pid = int(pos.position_id)
+        risk_usd = self._risk_stash.get(pid, 0.0)
+        intended = self._intended_entry.get(pid)
+        # Prefer the rich, multi-account notifier (same format as paper, tagged
+        # LIVE + showing the real fill's slippage vs the intended signal price),
+        # so the paper and demo alerts are directly comparable.
+        if hasattr(self._notifier, "notify_entry"):
+            self._notifier.notify_entry(
+                account_id=self.account_id, pos=pos, risk_usd=risk_usd,
+                open_count=len(self.open_positions()), guard_summary=self._risk.summary(),
+                kind=self._kind, intended_price=intended,
+            )
+            return
         self._notifier.send(
-            f"\U0001f4e5 LIVE ENTRY [{self.account_id}]\n"
+            f"\U0001f4e5 {self._kind.upper()} ENTRY [{self.account_id}]\n"
             f"{pos.direction.value} {pos.instrument} {pos.lots:.2f} lots @ {pos.entry_price:.5g}\n"
             f"SL {pos.exit_plan.stop_loss:.5g} | TP {pos.exit_plan.take_profit_prices[-1]:.5g} "
             f"| RR {pos.exit_plan.max_rr:.2f} | risk ${risk_usd:.2f}"
         )
 
-    def _notify_exit(self, pos, realized_rr, net_pnl_usd, reason) -> None:
+    def _notify_exit(self, pos, realized_rr, net_pnl_usd, reason,
+                     commission_usd: float | None = None, swap_usd: float | None = None) -> None:
         if not (self._notifier and self._alert_trades):
+            return
+        if hasattr(self._notifier, "notify_exit"):
+            self._notifier.notify_exit(
+                account_id=self.account_id, pos=pos, realized_rr=realized_rr,
+                net_pnl_usd=net_pnl_usd, reason=reason, guard_summary=self._risk.summary(),
+                kind=self._kind, commission_usd=commission_usd, swap_usd=swap_usd,
+            )
             return
         emoji = "\u2705" if net_pnl_usd > 0 else "\u274c"
         self._notifier.send(
-            f"{emoji} LIVE EXIT [{self.account_id}]\n"
+            f"{emoji} {self._kind.upper()} EXIT [{self.account_id}]\n"
             f"{pos.direction.value} {pos.instrument} @ {pos.exit_price:.5g} ({reason.value})\n"
             f"RR {realized_rr:+.2f} | net ${net_pnl_usd:+.2f} | bal ${self._risk.balance:.2f}"
         )

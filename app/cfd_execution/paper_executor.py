@@ -81,12 +81,15 @@ class PaperExecutor(BaseExecutor):
         notifier=None,                       # MT5Notifier or any object with .send(str)
         cost_model: CFDCostModel | None = None,
         alert_trades: bool = True,
+        kind: str = "paper",
     ) -> None:
         self._account = account
         self._store = store
         self._notifier = notifier
         self._cost_model = cost_model or COST_MODEL_INTRADAY
         self._alert_trades = alert_trades
+        # Alert label tag (PAPER ENTRY / …). Simulated fills only.
+        self._kind = kind
 
         self._risk = RiskGuard(account.to_risk_guard_config())
         self._risk_pct = account.effective_risk_per_trade_pct()
@@ -444,6 +447,7 @@ class PaperExecutor(BaseExecutor):
             self._notifier.notify_entry(
                 account_id=self.account_id, pos=pos, signal=signal, risk_usd=risk_usd,
                 open_count=len(self.open_positions()), guard_summary=self._risk.summary(),
+                kind=self._kind,
             )
             return
         self._notifier.send(
@@ -463,6 +467,7 @@ class PaperExecutor(BaseExecutor):
             self._notifier.notify_exit(
                 account_id=self.account_id, pos=pos, realized_rr=realized_rr,
                 net_pnl_usd=net_pnl_usd, reason=reason, guard_summary=self._risk.summary(),
+                kind=self._kind,
             )
             return
         emoji = "\u2705" if net_pnl_usd > 0 else "\u274c"

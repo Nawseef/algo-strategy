@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "Trading-stream config for the CFD runner (app.main_ctrader / app.main_cfd_paper).",
+    "Rename this file to 'data/cfd_streams.json' to ACTIVATE it (it is then loaded",
+    "automatically). While it is named '.example.json' the runner falls back to the",
+    "legacy CFD_PAPER_EXECUTION_MODE env vars instead.",
+    "",
+    "Each stream is fed the SAME strategy signals but executes + reports on its own:",
+    "  kind=paper : simulated fills, no broker orders (cost-free baseline).",
+    "  kind=demo  : REAL orders on a cTrader DEMO account.",
+    "  kind=live  : REAL orders on a funded / prop-firm account.",
+    "demo + live read REAL commission/swap from cTrader's close deal (not modeled).",
+    "Set enabled=false to turn any stream off. Give a stream its own",
+    "telegram_bot_token + telegram_chat_id to send its alerts to a dedicated",
+    "channel (e.g. one per prop firm); omit them to share the default CFD channel.",
+    "ctrader_account_id targets a specific ctidTraderAccountId (0 = the default",
+    "authenticated account)."
+  ],
+  "streams": [
+    {
+      "id": "paper",
+      "kind": "paper",
+      "enabled": true,
+      "balance": 100000,
+      "risk_pct": 0.5,
+      "cost_model": "raw"
+    },
+    {
+      "id": "ctrader_demo",
+      "kind": "demo",
+      "enabled": true,
+      "balance": 100000,
+      "risk_pct": 0.5
+    },
+    {
+      "id": "ftmo_100k",
+      "kind": "live",
+      "enabled": false,
+      "balance": 100000,
+      "risk_pct": 0.5,
+      "ctrader_account_id": 0,
+      "telegram_bot_token": "PUT_FTMO_BOT_TOKEN_HERE",
+      "telegram_chat_id": "PUT_FTMO_CHAT_ID_HERE"
+    },
+    {
+      "id": "fundednext_50k",
+      "kind": "live",
+      "enabled": false,
+      "balance": 50000,
+      "risk_pct": 0.5,
+      "ctrader_account_id": 0,
+      "telegram_bot_token": "PUT_FUNDEDNEXT_BOT_TOKEN_HERE",
+      "telegram_chat_id": "PUT_FUNDEDNEXT_CHAT_ID_HERE"
+    }
+  ]
+}
