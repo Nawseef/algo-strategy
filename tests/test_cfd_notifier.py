@@ -72,12 +72,11 @@ def test_entry_alert_content():
     n.notify_entry("cfd_demo", pos, sig, risk_usd=1000.0, open_count=1,
                    guard_summary=_guard_summary())
     msg = t.messages[-1]
-    assert "ENTRY" in msg and "[cfd_demo]" in msg
-    assert "gold" in msg                     # strategy id now in the header
-    assert "LONG XAUUSD" in msg
-    assert "RR 2.00" in msg
-    assert "$1,000.00" in msg
-    assert "v1" in msg
+    assert "XAUUSD" in msg
+    assert "gold" in msg                     # strategy id
+    assert "2400.000" in msg                 # full price precision
+    assert "RR 2.0" in msg
+    assert "$1,000.00" in msg                # risk
 
 
 def test_exit_alert_running_totals_and_mfe():
@@ -88,14 +87,12 @@ def test_exit_alert_running_totals_and_mfe():
                   reason=ExitReason.TAKE_PROFIT,
                   guard_summary=_guard_summary(balance=101_993.0))
     msg = t.messages[-1]
-    assert "EXIT" in msg and "[cfd_demo]" in msg and "WIN" in msg
-    assert "gold" in msg                     # strategy id now in the header
-    assert "TAKE_PROFIT" in msg
-    assert "hold 35m" in msg                 # (3_100_000-1_000_000)/60000 = 35
-    assert "+$1,993.00" in msg               # per-strategy realized PnL
-    assert "Account today:" in msg and "+$1,993.00" in msg
-    assert "1 trades  W:1 L:0 (100%)" in msg
-    assert "Peak" in msg and "beyond furthest TP" in msg
+    assert "+$1,993.00" in msg               # headline PnL
+    assert "gold" in msg                     # strategy id
+    assert "2.0R" in msg                     # RR in headline
+    assert "35m" in msg                      # hold time
+    assert "W:1" in msg                      # strategy tally
+    assert "beyond TP" in msg
 
 
 def test_exit_streak_and_risk_warning():
@@ -109,7 +106,7 @@ def test_exit_streak_and_risk_warning():
     n.notify_exit("cfd_demo", lose, realized_rr=-1.0, net_pnl_usd=-1200.0,
                   reason=ExitReason.STOP_LOSS, guard_summary=_guard_summary(balance=97_600.0))
     msg = t.messages[-1]
-    assert "LOSS" in msg
+    assert "-$1,200.00" in msg               # loss headline
     assert "2 losses in a row" in msg
     assert "down 2.4% today" in msg          # 2400/100000 = 2.4%
     assert "RISK:" in msg
@@ -143,9 +140,9 @@ def test_periodic_summary_multi_account_best():
     ]
     n.periodic_summary(summaries, sessions="london+new_york")
     msg = t.messages[-1]
-    assert "PORTFOLIO" in msg
-    assert "[demo]" in msg and "[ftmo]" in msg
-    assert "Best:" in msg and "demo" in msg.split("Best:")[1]
+    assert "SENTINEL" in msg
+    assert "london+new_york" in msg
+    assert "$101,000.00" in msg and "$99,200.00" in msg
 
 
 def test_eod_report_and_day_reset():
@@ -157,14 +154,15 @@ def test_eod_report_and_day_reset():
     summaries = [_guard_summary(account_id="demo", balance=101_500.0)]
     n.eod_report(summaries, "2026-08-06")
     msg = t.messages[-1]
-    assert "END OF DAY" in msg and "2026-08-06" in msg
-    assert "GREEN DAY" in msg
+    assert "2026-08-06" in msg
+    assert "+$1,500.00" in msg
+    assert "\U0001f7e2" in msg   # green dot = positive day
     assert "Day" in msg and "+$1,500.00" in msg
 
     # After reset the tally is cleared: a fresh EOD shows flat.
     n.on_day_reset()
     n.eod_report(summaries, "2026-08-07")
-    assert "FLAT DAY" in t.messages[-1]
+    assert "\u26aa" in t.messages[-1]   # white circle = flat day
 
 
 def test_alert_trades_false_suppresses_but_still_tallies():
@@ -177,4 +175,4 @@ def test_alert_trades_false_suppresses_but_still_tallies():
     assert t.messages == []
     # ...but the day tally still updated, so EOD reflects it.
     n.eod_report([_guard_summary(account_id="demo", balance=101_000.0)], "2026-08-06")
-    assert "GREEN DAY" in t.messages[-1]
+    assert "+$1,000.00" in t.messages[-1]

@@ -265,8 +265,10 @@ class CTraderExecutor(BaseExecutor):
     def _submit_entry(self, signal: CFDSignal, ref_price: float) -> None:
         inst = get_instrument(signal.instrument)
         sl_distance = abs(ref_price - signal.stop_loss)
+        # ALWAYS size from the INITIAL balance (not current balance) so risk $
+        # is constant regardless of running P&L.
         sizing = calculate_lot_size(
-            symbol=signal.instrument, account_balance=self._risk.balance,
+            symbol=signal.instrument, account_balance=self._risk.config.initial_balance,
             risk_pct=self._risk_pct, sl_distance_price=sl_distance, instrument=inst,
         )
         if sizing.rejected:
@@ -763,6 +765,7 @@ class CTraderExecutor(BaseExecutor):
         s = self._risk.summary()
         s.update({
             "account_id": self.account_id,
+            "kind": self._kind,
             "open_positions": len(self.open_positions()),
             "pending_arms": len(self._arms),
             "trades_opened": self._trades_opened,
