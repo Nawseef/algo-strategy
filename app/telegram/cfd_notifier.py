@@ -196,8 +196,9 @@ _ENTRY_ARROW = "\u2b06\ufe0f"   # ⬆️
 _EXIT_ICON_WIN = "\U0001f4b9\U0001f4b0"    # 💹💰
 _EXIT_ICON_LOSS = "\U0001f4db\U0001f4b0"   # 📛💰
 
-# Message border — row of ♾️ (19).
-_MSG_BORDER = "\u267e\ufe0f" * 19
+# Message border — top: 〰️ × 13, bottom: ♾️ × 13.
+_MSG_BORDER_TOP = "\u3030\ufe0f" * 13
+_MSG_BORDER = "\u267e\ufe0f" * 13
 
 # Why a trade closed — a small icon per ExitReason so the reason is scannable.
 _EXIT_REASON_ICON = {
@@ -311,7 +312,7 @@ class CFDTradeNotifier:
 
         # Compact card — no words like ENTRY/LONG/SHORT, emojis say it
         lines = [
-            _MSG_BORDER,
+            _MSG_BORDER_TOP,
             f"{_ENTRY_ARROW}{kind_icon} {dir_icon} {_b(pos.instrument)}",
             "",
             f"@ {_code(_price(pos.entry_price, sym))}  |  {pos.lots:.2f} lots",
@@ -391,7 +392,7 @@ class CFDTradeNotifier:
 
         # Big money headline first
         lines = [
-            _MSG_BORDER,
+            _MSG_BORDER_TOP,
             f"{emoji}{kind_icon} {_b(_signed(net_pnl_usd))} ({realized_rr:+.1f}R) {dir_icon}{pos.instrument}",
             "",
             f"{_code(_price(pos.entry_price, sym))} \u2192 {_code(_price(pos.exit_price, sym))}  "
@@ -471,7 +472,7 @@ class CFDTradeNotifier:
 
     def periodic_summary(self, summaries: list[dict], sessions: str = "") -> None:
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        lines = [_MSG_BORDER, _b(f"\U0001f4ca {ENGINE_NAME} \u2014 {now}")]
+        lines = [_MSG_BORDER_TOP, _b(f"\U0001f4ca {ENGINE_NAME} \u2014 {now}")]
         if sessions:
             lines.append(_i(sessions))
         lines.append("")
@@ -497,7 +498,7 @@ class CFDTradeNotifier:
             "\U0001f534" if portfolio_pnl < 0 else "\u26aa")
 
         lines = [
-            _MSG_BORDER,
+            _MSG_BORDER_TOP,
             f"\U0001f3c1 {date_str}  {verdict_dot} {_b(_signed(portfolio_pnl))}",
             "",
         ]
@@ -572,7 +573,7 @@ class CFDTradeNotifier:
 
         market_icon = "\U0001f310" if market_open else "\U0001f319"
         lines = [
-            _MSG_BORDER,
+            _MSG_BORDER_TOP,
             f"\U0001f680 {_b(f'{ENGINE_NAME} ON')}",
             "  ".join(acct_parts),
             f"{market_icon} {sessions or 'closed'}",
@@ -591,7 +592,7 @@ class CFDTradeNotifier:
         total_pnl = sum(realized_by_acct.values())
         total_trades = sum(trades_by_acct.values())
         lines = [
-            _MSG_BORDER,
+            _MSG_BORDER_TOP,
             f"\u23f9\ufe0f {_b(f'{ENGINE_NAME} OFF')}  {_signed(total_pnl)}  {total_trades}t  {dur_min:.0f}m",
         ]
         for s in summaries:
