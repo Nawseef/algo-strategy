@@ -252,10 +252,12 @@ class PaperExecutor(BaseExecutor):
         inst = get_instrument(signal.instrument)
 
         # Position sizing from risk %, using the ACTUAL stop distance.
+        # ALWAYS size from the INITIAL balance (not current balance) so risk $
+        # is constant regardless of running P&L.
         sl_distance = abs(fill_price - signal.stop_loss)
         sizing = calculate_lot_size(
             symbol=signal.instrument,
-            account_balance=self._risk.balance,
+            account_balance=self._risk.config.initial_balance,
             risk_pct=self._risk_pct,
             sl_distance_price=sl_distance,
             instrument=inst,
@@ -487,6 +489,7 @@ class PaperExecutor(BaseExecutor):
         s = self._risk.summary()
         s.update({
             "account_id": self.account_id,
+            "kind": self._kind,
             "open_positions": len(self.open_positions()),
             "pending_arms": len(self._arms),
             "trades_opened": self._trades_opened,

@@ -122,6 +122,33 @@ def _signed(x: float) -> str:
     return f"{'+' if x >= 0 else '-'}${abs(x):,.2f}"
 
 
+def _price(price: float, instrument: str | None = None) -> str:
+    """Format a price with FULL instrument-aware decimal precision.
+
+    Uses the instrument's pip_size to determine the correct number of decimals:
+      EURUSD/GBPUSD (pip 0.0001) → 5 decimals (e.g. 1.16911)
+      USDJPY (pip 0.01)          → 3 decimals (e.g. 158.299)
+      XAUUSD (pip 0.01)          → 2 decimals (e.g. 4478.55)
+      XAGUSD (pip 0.001)         → 3 decimals (e.g. 66.531)
+      XTIUSD (pip 0.01)          → 2 decimals (e.g. 87.19)
+      US30 (pip 1.0)             → 1 decimal  (e.g. 53070.6)
+      US500/USTEC/DE40 (pip 0.1) → 1 decimal  (e.g. 7680.4)
+    Falls back to Python's default repr if the instrument is unknown.
+    """
+    if instrument:
+        try:
+            inst = get_instrument(instrument)
+            # Determine decimals from pip_size: 0.0001 → 5, 0.001 → 4, 0.01 → 3,
+            # 0.1 → 1, 1.0 → 1 (min 1 decimal for readability)
+            import math
+            decimals = max(1, -int(math.floor(math.log10(inst.pip_size))) + 1)
+            return f"{price:.{decimals}f}"
+        except Exception:  # noqa: BLE001
+            pass
+    # Fallback: strip trailing zeros from a generous format
+    return f"{price:.6f}".rstrip("0").rstrip(".")
+
+
 # ─── HTML formatting (Telegram parse_mode=HTML) ─────────────────────────
 # Telegram has no font-size or arbitrary-color control — the only "emphasis"
 # tools any client renders are bold / italic / underline / strikethrough /
@@ -149,10 +176,10 @@ def _code(text: str) -> str:
 
 
 # ─── Icons ─────────────────────────────────────────────────────────────
-# Direction-aware entry icons (color + arrow, so LONG/SHORT is visible at a
-# glance without reading the text).
+# Direction-aware entry icons — cow for LONG (user prefers 🐄 over 🐂),
+# bear for SHORT.
 _ENTRY_ICON = {
-    "LONG": "\U0001f402",    # 🐂 bull  (long)
+    "LONG": "\U0001f404",    # � cow   (long)
     "SHORT": "\U0001f43b",   # 🐻 bear  (short)
 }
 
@@ -277,7 +304,8 @@ class CFDTradeNotifier:
         if init_bal and risk_usd:
             risk_pct = f" ({risk_usd / init_bal * 100:.1f}%)"
         plan = pos.exit_plan
-        tps = ", ".join(f"{p:.5g}" for p in plan.take_profit_prices)
+        sym = pos.instrument
+        tps = ", ".join(_price(p, sym) for p in plan.take_profit_prices)
         when = datetime.fromtimestamp(pos.entry_time_ms / 1000, timezone.utc).strftime("%H:%M UTC")
 
         with self._lock:
@@ -285,30 +313,31 @@ class CFDTradeNotifier:
             form = sday.form()
 
         dir_icon = _ENTRY_ICON.get(pos.direction.value, "\U0001f4e5")
-        label = f"{kind.upper()} ENTRY"
-        # Header = the EVENT (entry) + account + strategy. The bull/bear icon
-        # belongs on the DIRECTION line below, next to LONG/SHORT — not up here
-        # (a bull next to "DEMO" would read as if it tags the account).
         kind_icon = _KIND_ICON.get(kind, "\U0001f4e5")
+        label = f"{kind.upper()} ENTRY"
+
+        # Header + newline separator
         lines = [
-            f"{kind_icon} {_b(label)} [{account_id}] \u2014 {pos.strategy_id}",
+            f"{kind_icon} {_b(label)} [{account_id}]",
+            "\u2500" * 19,
+            "",
             f"{dir_icon} {_b(pos.direction.value + ' ' + pos.instrument)}  "
-            f"{pos.lots:.2f} lots @ {_code(f'{pos.entry_price:.5g}')}",
-            f"SL {_code(f'{plan.stop_loss:.5g}')} | TP {_code(tps)} | "
+            f"{pos.lots:.2f} lots @ {_code(_price(pos.entry_price, sym))}",
+            f"SL {_code(_price(plan.stop_loss, sym))} | TP {_code(tps)} | "
             f"RR {plan.max_rr:.2f}",
         ]
         # For a live fill, show the entry slippage vs the intended signal price.
         if intended_price and intended_price > 0:
             slip = (pos.entry_price - intended_price) * pos.direction.sign
             lines.append(
-                f"{_i('intended')} {_code(f'{intended_price:.5g}')} "
-                f"\u2192 fill {_code(f'{pos.entry_price:.5g}')} "
+                f"{_i('intended')} {_code(_price(intended_price, sym))} "
+                f"\u2192 fill {_code(_price(pos.entry_price, sym))} "
                 f"({_b(f'slip {slip:+.5g}')})"
             )
         if risk_usd:
-            lines.append(f"Risk {_b(_money(risk_usd) + risk_pct)} | {_i(pos.variant_id)}")
+            lines.append(f"Risk {_b(_money(risk_usd) + risk_pct)} | {_i(pos.strategy_id + '/' + pos.variant_id)}")
         else:
-            lines.append(_i(pos.variant_id))
+            lines.append(_i(pos.strategy_id + "/" + pos.variant_id))
         tail = f"Open: {open_count}"
         if balance is not None:
             tail += f" | Bal {_money(balance)}"
@@ -370,25 +399,30 @@ class CFDTradeNotifier:
         emoji = _EXIT_ICON_WIN if won else _EXIT_ICON_LOSS
         verdict = "WIN" if won else "LOSS"
         reason_icon = _exit_reason_icon(reason)
+        sym = pos.instrument
 
         hold_min = 0.0
         if pos.exit_time_ms and pos.entry_time_ms:
             hold_min = max(0.0, (pos.exit_time_ms - pos.entry_time_ms) / 60_000.0)
 
+        kind_icon = _KIND_ICON.get(kind, "\U0001f4e5")
         exit_label = f"{kind.upper()} EXIT"
         dir_icon = _ENTRY_ICON.get(pos.direction.value, "")
+
+        # Header + separator + blank line
         lines = [
-            f"{emoji} {_b(exit_label)} [{account_id}] \u2014 {_b(verdict)} \u2014 {strategy_id}",
-            f"{dir_icon} {pos.direction.value} {pos.instrument} @ {_code(f'{pos.exit_price:.5g}')} "
+            f"{emoji} {_b(exit_label)} [{account_id}] \u2014 {_b(verdict)}",
+            "\u2500" * 19,
+            "",
+            f"{dir_icon} {pos.direction.value} {pos.instrument} @ "
+            f"{_code(_price(pos.exit_price, sym))} "
             f"({reason_icon} {reason.value})",
-            f"Entry {_code(f'{pos.entry_price:.5g}')} \u2192 "
-            f"Exit {_code(f'{pos.exit_price:.5g}')} | {_i(f'hold {hold_min:.0f}m')}",
+            f"Entry {_code(_price(pos.entry_price, sym))} \u2192 "
+            f"Exit {_code(_price(pos.exit_price, sym))} | {_i(f'hold {hold_min:.0f}m')}",
             f"RR {realized_rr:+.2f} | net {_b(_signed(net_pnl_usd))}",
         ]
 
         # Real broker charges (from the close deal's CloseDetail), when provided.
-        # Shown as costs (positive magnitude) so the paper-vs-demo cost gap is
-        # obvious. cTrader reports charges negative, hence the sign flip.
         if commission_usd is not None or swap_usd is not None:
             parts = []
             if commission_usd is not None:
@@ -401,9 +435,9 @@ class CFDTradeNotifier:
         if mfe_line:
             lines.append(_i(mfe_line))
 
-        lines.append("\u2500" * 20)
-        # Per-STRATEGY stats (this is what "last 7 trades" / streak means when
-        # more than one strategy trades the same account).
+        lines.append("")
+        lines.append("\u2500" * 19)
+        # Per-STRATEGY stats
         lines.append(
             f"{_b(strategy_id)}: {_b(_signed(strat_realized))} | "
             f"{strat_trades} trades  W:{strat_wins} L:{strat_losses} ({strat_win_rate:.0f}%)"
@@ -413,9 +447,9 @@ class CFDTradeNotifier:
         if strat_streak:
             lines.append(_i(f"Streak: {strat_streak}"))
 
-        lines.append("\u2500" * 20)
-        # Per-ACCOUNT stats (balance/day PnL/DD are account-wide, across ALL
-        # strategies trading it).
+        lines.append("")
+        lines.append("\u2500" * 19)
+        # Per-ACCOUNT stats (balance/day PnL/DD are account-wide)
         day_pct = (day_realized / init_bal * 100.0) if init_bal else 0.0
         lines.append(
             f"Account today: {_b(_signed(day_realized))} ({day_pct:+.2f}%) | "
@@ -424,9 +458,7 @@ class CFDTradeNotifier:
         if balance is not None:
             lines.append(f"Bal {_money(balance)}")
 
-        # Risk warning based on the day's realized drawdown. Bolded (not just
-        # italic like the routine lines above) so a real warning stands out
-        # from the surrounding stats block.
+        # Risk warning
         if init_bal and day_realized < 0:
             loss_pct = abs(day_realized) / init_bal * 100.0
             if loss_pct >= _WARNING_LOSS_PCT:
@@ -434,10 +466,7 @@ class CFDTradeNotifier:
             elif loss_pct >= _CAUTION_LOSS_PCT:
                 lines.append(f"Caution: down {loss_pct:.1f}% today")
 
-        # Halt banner if the risk guard tripped. Uses 🚫 (not 🛑, which is
-        # reserved for the STOP_LOSS exit-reason icon above) so the two are
-        # never confused when scanning quickly. Bolded — this is the single
-        # most important line that can appear in any alert.
+        # Halt banner
         if status and status != "ACTIVE":
             lines.append(_b(f"\U0001f6ab ACCOUNT {status} — new trades blocked"))
 
@@ -454,7 +483,7 @@ class CFDTradeNotifier:
         if not peak_price or peak_price == pos.entry_price:
             return ""
         peak_usd = pos.mfe_price * point_value * pos.lots
-        line = f"Peak {peak_price:.5g} ({_signed(peak_usd)})"
+        line = f"Peak {_price(peak_price, pos.instrument)} ({_signed(peak_usd)})"
         tps = pos.exit_plan.take_profit_prices
         if tps:
             furthest = tps[-1]
@@ -465,7 +494,7 @@ class CFDTradeNotifier:
                 line += " — beyond furthest TP"
             else:
                 missed = abs(furthest - peak_price)
-                line += f" — missed top TP by {missed:.5g}"
+                line += f" — missed top TP by {_price(missed, pos.instrument)}"
         return line
 
     # ─── Portfolio summary / EOD (called by the runner) ──────────
@@ -477,10 +506,11 @@ class CFDTradeNotifier:
             lines.append(_i(sessions))
         lines.append("")
         for s in summaries:
-            lines.extend(self._account_block(s))
+            kind_icon = _KIND_ICON.get(s.get("kind", "paper"), "\U0001f4c4")
+            lines.extend(self._account_block(s, kind_icon))
+            lines.append("")
         best = self._best(summaries)
         if best:
-            lines.append("")
             lines.append(f"Best: {_b(best[0])} ({_signed(best[1])})")
         self.send("\n".join(lines))
 
@@ -523,19 +553,21 @@ class CFDTradeNotifier:
             lines.append(f"Worst: {_b(worst[0])} ({_signed(worst[1])})")
         self.send("\n".join(lines))
 
-    def _account_block(self, s: dict) -> list[str]:
+    def _account_block(self, s: dict, kind_icon: str = "\U0001f4c4") -> list[str]:
         aid = s.get("account_id", "?")
         bal = s.get("balance", 0.0)
         day = s.get("daily_pnl", 0.0)
         init_bal = s.get("initial_balance") or 0.0
         day_pct = (day / init_bal * 100.0) if init_bal else 0.0
         dd = s.get("daily_dd_used_pct", 0.0)
+        max_dd = s.get("max_dd_used_pct", 0.0)
         trades = s.get("trades_today", 0)
         with self._lock:
             wr = self._day(aid).win_rate if aid in self._days else 0.0
         block = [
-            f"{_b(f'[{aid}]')}  Bal {_money(bal)}  Day {_b(_signed(day))} ({day_pct:+.2f}%)",
-            f"  Trades {trades}  WR {wr:.0f}%  DDused {dd:.1f}%",
+            f"{kind_icon} {_b(f'[{aid}]')}  Bal {_money(bal)}",
+            f"  Day {_b(_signed(day))} ({day_pct:+.2f}%)  DDused {dd:.1f}%  MaxDD {max_dd:.1f}%",
+            f"  Trades {trades}  WR {wr:.0f}%",
         ]
         if s.get("status") and s["status"] != "ACTIVE":
             block.append(_b(f"  \U0001f6ab {s['status']}"))
