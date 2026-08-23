@@ -32,8 +32,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from functools import wraps
+from pathlib import Path
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -48,6 +49,33 @@ logger = get_logger(__name__)
 
 # ─── Security ─────────────────────────────────────────────────────────────────
 AUTHORIZED_USER_IDS: set[int] = set()
+
+
+# ─── Pause persistence ────────────────────────────────────────────────────────
+# The paused flag is mirrored to a small file so a process restart does NOT
+# silently resume trading. Relative to the working dir (systemd sets it to the
+# repo root), matching how data/cfd_streams.json etc. are resolved.
+_PAUSE_FLAG_PATH = Path("data/bot_paused.flag")
+
+
+def _persist_pause(paused: bool) -> None:
+    """Mirror the paused flag to disk (best-effort; never raise to the handler)."""
+    try:
+        if paused:
+            _PAUSE_FLAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _PAUSE_FLAG_PATH.write_text("paused\n")
+        else:
+            _PAUSE_FLAG_PATH.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not persist pause state: %s", e)
+
+
+def load_persisted_pause() -> bool:
+    """Return the paused state persisted across restarts (default False)."""
+    try:
+        return _PAUSE_FLAG_PATH.exists()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _authorized(func):
@@ -128,6 +156,23 @@ _KIND_ICON = {
     "demo": "\U0001f4e5",   # 📥
     "live": "\u26a1",       # ⚡
 }
+
+# The command menu shown in Telegram's "/" autocomplete dropdown. Registered
+# with setMyCommands on startup so the owner sees the list without memorising it.
+_COMMAND_MENU = [
+    ("status", "Portfolio snapshot"),
+    ("positions", "Open positions detail"),
+    ("today", "Today's closed trades"),
+    ("last", "Last N trades (e.g. /last 5)"),
+    ("risk", "Risk guard state"),
+    ("ping", "Health check"),
+    ("config", "Running configuration"),
+    ("closeall", "Flatten all positions (confirm YES)"),
+    ("close", "Close one instrument, e.g. /close USDJPY"),
+    ("pause", "Stop taking new signals"),
+    ("resume", "Resume taking signals"),
+    ("help", "List all commands"),
+]
 
 
 # ─── Command Handlers ─────────────────────────────────────────────────────────
@@ -460,15 +505,19 @@ async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @_authorized
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pause new signals (keep managing open positions)."""
+    """Pause new signals (keep managing open positions). Survives restarts."""
     context.bot_data["paused"] = True
-    await update.message.reply_text("\u23f8\ufe0f Paused \u2014 no new signals taken.")
+    _persist_pause(True)
+    await update.message.reply_text(
+        "\u23f8\ufe0f Paused \u2014 no new signals taken (persists across restarts)."
+    )
 
 
 @_authorized
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resume signals."""
     context.bot_data["paused"] = False
+    _persist_pause(False)
     await update.message.reply_text("\u25b6\ufe0f Resumed \u2014 signals active.")
 
 
@@ -539,50 +588,21 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["pending_close_instrument"] = None
         from app.cfd_execution.base import ExitReason
 
-        # Count positions on this instrument, then flatten all (only way via
-        # the public BaseExecutor interface). If only this instrument is open,
-        # it's equivalent. If other instruments are open too, warn the user.
-        all_pos = mgr.open_positions(instrument)
-        total_on_instrument = sum(len(p) for p in all_pos.values())
-
-        if total_on_instrument == 0:
+        # Close this instrument on EVERY account (paper + demo + live) via the
+        # manager fan-out. Each executor closes only its OWN positions on this
+        # instrument. Paper settles immediately; live/demo send a broker close
+        # (asynchronous), so the count reflects closes requested, not fills.
+        before = sum(len(p) for p in mgr.open_positions(instrument).values())
+        if before == 0:
             await update.message.reply_text(f"No open positions on {instrument}.")
             return
-
-        # Close ONLY this instrument. PaperExecutor exposes a per-position close
-        # internally; a live/demo (cTrader) executor does NOT offer a safe
-        # per-instrument close via any public API — and its flatten_all() would
-        # close EVERY instrument on that account. We must never silently close
-        # unrelated live positions, so live streams are skipped with a warning.
-        closed_count = 0
-        skipped_live: list[str] = []
-        for ex in mgr.executors():
-            positions = ex.open_positions(instrument)
-            if not positions:
-                continue
-            if hasattr(ex, "_close_position") and hasattr(ex, "_last_price"):
-                # PaperExecutor — close each matching position at last price.
-                for pos in list(positions):
-                    try:
-                        price = ex._last_price.get(pos.instrument, pos.entry_price)
-                        ts = ex._now_ms() if hasattr(ex, "_now_ms") else time.time() * 1000
-                        ex._close_position(pos, price, ExitReason.MANUAL, ts)
-                        closed_count += 1
-                    except Exception as e:  # noqa: BLE001
-                        logger.error("per-instrument close failed on %s: %s",
-                                     ex.account_id, e)
-            else:
-                # Live/demo executor — refuse to guess (would close everything).
-                skipped_live.append(ex.account_id)
-
-        msg = f"\u2705 Closed {closed_count} position(s) on {instrument}."
-        if skipped_live:
-            msg += (
-                f"\n\u26a0\ufe0f Skipped live/demo account(s): {', '.join(skipped_live)}. "
-                f"Per-instrument close isn't supported there — use /closeall or "
-                f"close it directly in cTrader."
-            )
-        await update.message.reply_text(msg)
+        requested = mgr.flatten_instrument(instrument, ExitReason.MANUAL)
+        await update.message.reply_text(
+            f"\u2705 Close requested for {requested} position(s) on {_b(instrument)}.\n"
+            f"Paper settles instantly; live/demo close on the broker \u2014 "
+            f"check /positions in a few seconds.",
+            parse_mode="HTML",
+        )
 
 
 # ─── Boot (background thread with own asyncio loop) ──────────────────────────
@@ -664,6 +684,12 @@ async def _start_polling(token: str, bot_data: dict) -> None:
     # Initialize and start polling (non-blocking within this loop)
     await app.initialize()
     await app.start()
+    # Register the "/" autocomplete menu (best-effort; a failure here must not
+    # stop the bot from polling).
+    try:
+        await app.bot.set_my_commands([BotCommand(c, d) for c, d in _COMMAND_MENU])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("set_my_commands failed (menu unavailable): %s", e)
     await app.updater.start_polling(drop_pending_updates=True)
 
     # Keep the loop alive until cancelled by stop_command_bot()

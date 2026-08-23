@@ -136,6 +136,24 @@ class MultiAccountManager:
         for ex in self._executors.values():
             ex.flatten_all(reason)
 
+    def flatten_instrument(
+        self, instrument: str, reason: ExitReason = ExitReason.MANUAL,
+    ) -> int:
+        """Close open positions on ONE instrument across every account.
+
+        Returns the total number of positions a close was initiated for (across
+        all executors). For live/demo executors the close is asynchronous, so the
+        count reflects requested closes, not settled fills.
+        """
+        total = 0
+        for ex in self._executors.values():
+            try:
+                total += ex.flatten_instrument(instrument, reason)
+            except Exception as e:  # noqa: BLE001 - one account must not break others
+                logger.error("flatten_instrument failed for account %s: %s",
+                             ex.account_id, e)
+        return total
+
     # ─── Reporting ───────────────────────────────────────────────
 
     def open_positions(self, instrument: str | None = None) -> dict[str, list[ManagedPosition]]:

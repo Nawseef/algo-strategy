@@ -401,6 +401,19 @@ class PaperExecutor(BaseExecutor):
             price = self._last_price.get(pos.instrument, pos.entry_price)
             self._close_position(pos, price, reason, self._now_ms())
 
+    def flatten_instrument(
+        self, instrument: str, reason: ExitReason = ExitReason.MANUAL,
+    ) -> int:
+        """Force-close open positions on ONE instrument at the last known price."""
+        closed = 0
+        for pos in list(self._positions.values()):
+            if pos.instrument != instrument or not pos.is_open:
+                continue
+            price = self._last_price.get(pos.instrument, pos.entry_price)
+            self._close_position(pos, price, reason, self._now_ms())
+            closed += 1
+        return closed
+
     # ─── Persistence + alerts ────────────────────────────────────
 
     def _persist_trade(
