@@ -17,5 +17,13 @@ rpyc==5.2.3
 # 0.8.0. Requires Python 3.12+.
 ctrader-api-client>=0.8.0
 
+# Telegram command bot (receive commands from the owner: /status, /positions,
+# /closeall, /pause, etc.). The SEND-only notifiers use raw urllib, but the
+# command LISTENER needs the async Application/Updater polling API added in v20.
+# Pinned >=21.0 for the stable v21 asyncio lifecycle (initialize/start/
+# updater.start_polling). Only needed by app/telegram/bot_commands.py — the
+# import there is guarded so the engine still runs if it's absent.
+python-telegram-bot>=21.0
+
 # Analytics (Phase 7)
 pandas>=2.0.0

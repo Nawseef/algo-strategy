@@ -95,6 +95,10 @@ class CTraderExecutor(BaseExecutor):
 
         self._risk = RiskGuard(account.to_risk_guard_config())
         self._risk_pct = account.effective_risk_per_trade_pct()
+        # The balance used for SIZING (constant, never changes with P&L or
+        # broker-seeded balance). This is the stream's configured balance —
+        # e.g. $10k — NOT the broker's real balance.
+        self._sizing_balance = account.initial_balance
 
         # Positions we opened, keyed by cTrader position_id. Per-position live
         # state lives in the side dicts below (kept off ManagedPosition).
@@ -235,6 +239,22 @@ class CTraderExecutor(BaseExecutor):
             if self._client_managed.get(pos_id):
                 self._check_client_tps(pos_id, pos, bid)
 
+        # 3) Update floating PnL on the risk guard (across ALL open positions).
+        self._risk.update_unrealized_pnl(self._total_floating_pnl_usd())
+
+    def _total_floating_pnl_usd(self) -> float:
+        """Sum of all open positions' floating P&L in USD."""
+        total = 0.0
+        for pos in self._positions.values():
+            if pos.status is not PositionStatus.OPEN:
+                continue
+            price = self._last_price.get(pos.instrument)
+            if price is None:
+                continue
+            inst = get_instrument(pos.instrument)
+            total += pos.price_pnl_per_unit(price) * pos.remaining_fraction * inst.point_value_per_lot * pos.lots
+        return total
+
     def on_candle_close(self, instrument: str, timestamp_ms: float) -> None:
         # Age arms.
         for key, (sig, remaining) in list(self._arms.items()):
@@ -268,7 +288,7 @@ class CTraderExecutor(BaseExecutor):
         # ALWAYS size from the INITIAL balance (not current balance) so risk $
         # is constant regardless of running P&L.
         sizing = calculate_lot_size(
-            symbol=signal.instrument, account_balance=self._risk.config.initial_balance,
+            symbol=signal.instrument, account_balance=self._sizing_balance,
             risk_pct=self._risk_pct, sl_distance_price=sl_distance, instrument=inst,
         )
         if sizing.rejected:
@@ -293,7 +313,10 @@ class CTraderExecutor(BaseExecutor):
             return
 
         symbol_id = self._broker.symbol_map.get(signal.instrument)
-        volume = int(details.lots_to_volume(lots))
+        raw_volume = details.lots_to_volume(lots)
+        # Round to the broker's volume step to avoid TRADING_BAD_VOLUME errors.
+        step = getattr(details, "step_volume", 1000) or 1000
+        volume = int(round(raw_volume / step) * step)
         if volume < details.min_volume:
             logger.info("[%s] sized volume %d < min %d for %s — skipping",
                         self.account_id, volume, details.min_volume, signal.instrument)
