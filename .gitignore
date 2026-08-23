@@ -39,3 +39,6 @@ logs/dukascopy_fetch.pid
 *.jsonl.gz
 *.trades.jsonl
 *.trades.jsonl.gz
+
+# Telegram bot runtime pause flag (transient state, not source)
+data/bot_paused.flag

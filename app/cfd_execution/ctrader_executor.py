@@ -693,6 +693,26 @@ class CTraderExecutor(BaseExecutor):
                 self._closing_full.add(pos_id)
                 self._run(self._close_volume(pos_id, self._remaining_volume(pos_id, pos)))
 
+    def flatten_instrument(
+        self, instrument: str, reason: ExitReason = ExitReason.MANUAL,
+    ) -> int:
+        """Close ONLY this executor's OPEN positions on ONE instrument.
+
+        Sends a broker close for the full remaining volume of each matching
+        position (same path as flatten_all / the time-stop), guarded by
+        ``_closing_full`` so a position isn't double-closed. Never touches
+        positions on other instruments, nor positions this executor didn't open.
+        """
+        closed = 0
+        for pos_id, pos in list(self._positions.items()):
+            if (pos.instrument == instrument
+                    and pos.status is PositionStatus.OPEN
+                    and pos_id not in self._closing_full):
+                self._closing_full.add(pos_id)
+                self._run(self._close_volume(pos_id, self._remaining_volume(pos_id, pos)))
+                closed += 1
+        return closed
+
     # ─── Persistence + alerts (shared shape with PaperExecutor) ───
 
     def _persist_trade(self, pos, realized_rr, pnl_price, pnl_usd, cost_usd, net_pnl_usd) -> None:

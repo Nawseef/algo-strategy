@@ -96,7 +96,11 @@ from app.core.models import Candle, Timeframe
 from app.db.live_candle_store import LiveCandleStore
 from app.db.research_store import ResearchStore
 try:
-    from app.telegram.bot_commands import start_command_bot, stop_command_bot
+    from app.telegram.bot_commands import (
+        load_persisted_pause,
+        start_command_bot,
+        stop_command_bot,
+    )
     _HAS_CMD_BOT = True
 except ImportError:
     _HAS_CMD_BOT = False
@@ -523,11 +527,19 @@ class CFDPaperTradingApp:
             or self._config.mt5.telegram_bot_token
         )
         if user_ids and bot_token and _HAS_CMD_BOT:
+            # Restore the paused state persisted by a previous /pause, so a
+            # restart does NOT silently resume trading.
+            paused = load_persisted_pause()
+            if paused:
+                logger.warning(
+                    "Starting PAUSED (persisted /pause flag present) — no new "
+                    "signals will be taken until /resume.",
+                )
             self._bot_data = {
                 "manager": self._manager,
                 "store": self._store,
                 "app_ref": self,
-                "paused": False,
+                "paused": paused,
                 "boot_time": time.time(),
             }
             start_command_bot(

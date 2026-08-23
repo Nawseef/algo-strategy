@@ -353,3 +353,15 @@ class BaseExecutor(ABC):
     def flatten_all(self, reason: ExitReason = ExitReason.EOD_FLATTEN) -> None:
         """Force-close all open positions (weekend / risk / shutdown)."""
         ...
+
+    @abstractmethod
+    def flatten_instrument(
+        self, instrument: str, reason: ExitReason = ExitReason.MANUAL,
+    ) -> int:
+        """Force-close open positions on ONE instrument only.
+
+        Returns the number of positions a close was initiated for. For a live
+        executor the close is asynchronous (order sent to the broker), so the
+        return counts positions the close was requested for, not settled fills.
+        """
+        ...
