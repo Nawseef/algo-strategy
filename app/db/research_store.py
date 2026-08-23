@@ -1178,6 +1178,32 @@ class ResearchStore:
         rows = self._query(sql)
         return {r["account_id"]: (r["total"] or 0.0) for r in rows}
 
+    def get_recent_cfd_paper_trades(
+        self, limit: int = 10, session_date: str | None = None,
+    ) -> list[dict]:
+        """Fetch the most recent closed CFD paper/live trades.
+
+        Args:
+            limit: Maximum number of trades to return (most recent first).
+            session_date: If provided, filter to trades on this date (YYYY-MM-DD).
+
+        Returns:
+            List of trade dicts ordered by exit_time_ms DESC (newest first).
+        """
+        ph = "%s" if self._use_postgres else "?"
+        clauses = []
+        params: list = []
+        if session_date is not None:
+            clauses.append(f"session_date={ph}")
+            params.append(session_date)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            f"SELECT * FROM cfd_paper_trades{where} "
+            f"ORDER BY exit_time_ms DESC LIMIT {ph}"
+        )
+        params.append(limit)
+        return self._query(sql, tuple(params))
+
     # ─── Historical Candles (for backtesting) ────────────────────────────────
 
     def write_historical_candles_batch(

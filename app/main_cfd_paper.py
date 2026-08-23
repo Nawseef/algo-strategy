@@ -95,6 +95,11 @@ from app.core.events import EventBus
 from app.core.models import Candle, Timeframe
 from app.db.live_candle_store import LiveCandleStore
 from app.db.research_store import ResearchStore
+try:
+    from app.telegram.bot_commands import start_command_bot, stop_command_bot
+    _HAS_CMD_BOT = True
+except ImportError:
+    _HAS_CMD_BOT = False
 from app.telegram.cfd_notifier import ENGINE_NAME, CFDTradeNotifier
 from app.telegram.mt5_notifier import MT5Notifier
 from app.utils import forex_hours
@@ -297,6 +302,7 @@ class CFDPaperTradingApp:
         self._signal_count = 0
         self._last_stats_time = time.time()
         self._stats_interval_s = 30.0
+        self._bot_data: dict | None = None  # Set in start() when command bot is enabled
 
         # Schedule / session monitor state.
         self._monitor_running = False
@@ -504,6 +510,34 @@ class CFDPaperTradingApp:
                 self._summaries_for(acct_ids), strat_ids,
                 bool(st["market_open"]), sess, kinds=kinds,
             )
+
+        # ── Telegram command bot (receive commands from owner). ──
+        # Uses the same bot token as the notifier (send + receive coexist). Runs
+        # on a background daemon thread with its own asyncio loop — non-blocking.
+        user_ids = [
+            int(x) for x in os.getenv("CFD_TELEGRAM_USER_ID", "").split(",")
+            if x.strip()
+        ]
+        bot_token = (
+            self._feed_cfg.telegram_bot_token
+            or self._config.mt5.telegram_bot_token
+        )
+        if user_ids and bot_token and _HAS_CMD_BOT:
+            self._bot_data = {
+                "manager": self._manager,
+                "store": self._store,
+                "app_ref": self,
+                "paused": False,
+                "boot_time": time.time(),
+            }
+            start_command_bot(
+                token=bot_token,
+                user_ids=user_ids,
+                bot_data=self._bot_data,
+            )
+        else:
+            self._bot_data = None
+
         self._start_monitor()
 
     def _wire_pipeline(self) -> None:
@@ -634,6 +668,9 @@ class CFDPaperTradingApp:
                     logger.info(
                         "Entry suppressed (pre-weekend flatten window): %s", sig
                     )
+                    continue
+                if self._bot_data and self._bot_data.get("paused"):
+                    logger.info("Signal skipped (paused via /pause): %s", sig)
                     continue
                 self._signal_count += 1
                 logger.info("SIGNAL %s", sig)
@@ -927,6 +964,12 @@ class CFDPaperTradingApp:
         def shutdown(signum, frame):
             logger.info("Shutdown signal received. Flattening + stopping ...")
             self._monitor_running = False
+            # Stop the Telegram command bot gracefully (prevent 30s polling hang).
+            if _HAS_CMD_BOT:
+                try:
+                    stop_command_bot()
+                except Exception as e:  # noqa: BLE001
+                    logger.error("command bot stop failed: %s", e)
             # Flatten open paper positions on shutdown so nothing is left dangling.
             try:
                 self._manager.flatten_all(ExitReason.EOD_FLATTEN)

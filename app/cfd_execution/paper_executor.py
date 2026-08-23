@@ -93,6 +93,9 @@ class PaperExecutor(BaseExecutor):
 
         self._risk = RiskGuard(account.to_risk_guard_config())
         self._risk_pct = account.effective_risk_per_trade_pct()
+        # The balance used for SIZING (constant, never changes with P&L).
+        # This is the stream's configured balance (e.g. $10k).
+        self._sizing_balance = account.initial_balance
 
         # Open positions by position_id.
         self._positions: dict[str, ManagedPosition] = {}
@@ -251,13 +254,12 @@ class PaperExecutor(BaseExecutor):
         """Open a position from a signal at the given fill price."""
         inst = get_instrument(signal.instrument)
 
-        # Position sizing from risk %, using the ACTUAL stop distance.
         # ALWAYS size from the INITIAL balance (not current balance) so risk $
         # is constant regardless of running P&L.
         sl_distance = abs(fill_price - signal.stop_loss)
         sizing = calculate_lot_size(
             symbol=signal.instrument,
-            account_balance=self._risk.config.initial_balance,
+            account_balance=self._sizing_balance,
             risk_pct=self._risk_pct,
             sl_distance_price=sl_distance,
             instrument=inst,
