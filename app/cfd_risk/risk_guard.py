@@ -226,7 +226,7 @@ class RiskGuard:
             return False, f"Trading halted: {self._status.value}"
 
         # Check per-trade risk limit
-        max_per_trade = self._balance * (self._config.max_risk_per_trade_pct / 100.0)
+        max_per_trade = self._config.initial_balance * (self._config.max_risk_per_trade_pct / 100.0)
         if risk_usd > max_per_trade:
             return False, (
                 f"Trade risk ${risk_usd:.2f} exceeds per-trade limit "
@@ -363,6 +363,34 @@ class RiskGuard:
         self._daily_halts = 0
 
         logger.info("Account reset: balance=$%.2f", balance)
+
+    def _seed_balance(self, real_balance: float) -> None:
+        """
+        Seed the running balance from a real broker account for DD tracking,
+        WITHOUT overwriting config.initial_balance (which is the sizing base).
+
+        Use this when the broker's real balance differs from the configured
+        initial (e.g. demo account with $8k, but sizing is off a $10k config).
+        DD limits are enforced against the real balance; per-trade risk limit
+        uses config.initial_balance (the sizing base).
+        """
+        self._balance = real_balance
+        self._unrealized_pnl = 0.0
+        self._peak_balance = real_balance
+        self._max_dd_floor = real_balance * (1 - self._config.max_dd_pct / 100.0)
+        self._daily = DailyState(
+            start_of_day_equity=real_balance,
+            daily_lowest_equity=real_balance,
+        )
+        self._status = RiskStatus.ACTIVE
+        self._total_realized_pnl = 0.0
+        self._total_trades = 0
+        self._daily_halts = 0
+
+        logger.info(
+            "_seed_balance: real=$%.2f, config.initial=$%.2f (sizing base unchanged)",
+            real_balance, self._config.initial_balance,
+        )
 
     # ─── Reporting ───────────────────────────────────────────────────────────
 
