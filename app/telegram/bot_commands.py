@@ -43,6 +43,7 @@ from telegram.ext import (
     filters,
 )
 
+from app.utils import forex_hours
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -175,6 +176,64 @@ _COMMAND_MENU = [
 ]
 
 
+def _today_trading_date() -> str:
+    """Current FX trading day, matching how cfd_paper_trades.session_date is stored
+    (forex_hours.trading_day, NOT the UTC calendar date)."""
+    try:
+        return str(forex_hours.trading_day())
+    except Exception:  # noqa: BLE001
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _floating_by_strategy(positions, feed) -> dict[str, float]:
+    """Sum floating (unrealized) USD P&L per strategy across a list of open
+    ManagedPositions, using the feed's current bid (same basis as management)."""
+    out: dict[str, float] = {}
+    ltp: dict = {}
+    try:
+        if feed is not None and hasattr(feed, "get_ltp"):
+            ltp = feed.get_ltp() or {}
+    except Exception:  # noqa: BLE001
+        ltp = {}
+    from app.cfd_risk.instruments import get_instrument
+    for pos in positions:
+        strat = getattr(pos, "strategy_id", "?")
+        fl = 0.0
+        snap = ltp.get(pos.instrument)
+        px = snap.get("bid") if isinstance(snap, dict) else None
+        if px:
+            try:
+                inst = get_instrument(pos.instrument)
+                fl = (pos.price_pnl_per_unit(px) * pos.remaining_fraction
+                      * inst.point_value_per_lot * pos.lots)
+            except Exception:  # noqa: BLE001
+                fl = 0.0
+        out[strat] = out.get(strat, 0.0) + fl
+    return out
+
+
+def _strategy_breakdown_lines(account_id, open_by_acct, today_by_key, feed) -> list[str]:
+    """Per-strategy lines for one account (dot trails the amount):
+      strategy  +$X 🟠   — a live position (floating P&L, ongoing)
+      strategy  +$Y 🟢   — closed today, in profit
+      strategy  -$Z 🔴   — closed today, at a loss
+    A strategy that is both open now AND closed earlier today shows both lines.
+    """
+    lines: list[str] = []
+    positions = open_by_acct.get(account_id, []) or []
+    floating = _floating_by_strategy(positions, feed)
+    # 🟠 ongoing (open position, floating P&L) — dot trails the amount.
+    for strat in sorted(floating):
+        lines.append(f"  {_i(strat)}  {_signed(floating[strat])} \U0001f7e0")
+    # 🟢/🔴 closed today (realized P&L) — color already says profit/loss.
+    for (aid, strat), (pnl, cnt) in sorted(today_by_key.items()):
+        if aid != account_id:
+            continue
+        dot = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
+        lines.append(f"  {_i(strat)}  {_signed(pnl)} {dot}")
+    return lines
+
+
 # ─── Command Handlers ─────────────────────────────────────────────────────────
 
 
@@ -196,6 +255,26 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not summaries:
         lines.append("No accounts configured.")
     else:
+        # Gather per-strategy data ONCE for all accounts: live positions (for
+        # floating) and trades closed today (for realized), grouped by account.
+        store = context.bot_data.get("store")
+        feed = getattr(app_ref, "_feed", None)
+        try:
+            open_by_acct = mgr.open_positions()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("status: open_positions failed: %s", e)
+            open_by_acct = {}
+        today_by_key: dict[tuple, tuple[float, int]] = {}
+        if store is not None:
+            try:
+                td = _today_trading_date()
+                for t in store.get_recent_cfd_paper_trades(limit=500, session_date=td):
+                    key = (t.get("account_id"), t.get("strategy_id"))
+                    pnl, cnt = today_by_key.get(key, (0.0, 0))
+                    today_by_key[key] = (pnl + (t.get("net_pnl_usd") or 0.0), cnt + 1)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("status: today-trades fetch failed: %s", e)
+
         for s in summaries:
             kind = s.get("kind", "paper")
             icon = _KIND_ICON.get(kind, "\U0001f4c4")
@@ -208,9 +287,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dd_pct = s.get("daily_dd_used_pct", 0)
             open_pos = s.get("open_positions", 0)
             trades_today = s.get("trades_today", 0)
+            account_id = s.get("account_id", "?")
 
             lines.append(
-                f"{icon} {_b(s.get('account_id', '?'))}  {status_icon}"
+                f"{icon} {_b(account_id)}  {status_icon}"
             )
             lines.append(
                 f"  Bal {_money(balance)}  |  Day {_signed(daily_pnl)} ({daily_pct:+.1f}%)"
@@ -222,6 +302,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unrealized = s.get("unrealized_pnl", 0)
             if open_pos > 0:
                 lines.append(f"  Floating: {_signed(unrealized)}")
+            # Per-strategy breakdown (ongoing 🟠 / profit 🟢 / loss 🔴).
+            lines.extend(
+                _strategy_breakdown_lines(account_id, open_by_acct, today_by_key, feed)
+            )
             lines.append("")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -268,7 +352,7 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Today's closed trades from the DB."""
     store = context.bot_data["store"]
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_str = _today_trading_date()
 
     trades = store.get_recent_cfd_paper_trades(limit=50, session_date=today_str)
 

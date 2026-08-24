@@ -170,7 +170,11 @@ class CTraderExecutor(BaseExecutor):
             logger.warning("[%s] account-info fetch failed: %s", self.account_id, e)
         if info and info.get("balance") is not None:
             real_bal = float(info["balance"])
-            self._risk.reset_account(real_bal)
+            # Seed the RiskGuard's running balance from the real broker account
+            # for DD tracking, but do NOT overwrite config.initial_balance (which
+            # is the sizing base from the stream config, e.g. $10k). Use
+            # _seed_balance instead of reset_account.
+            self._risk._seed_balance(real_bal)
             self._last_real_balance = real_bal
             lev = info.get("leverage")
             logger.info(
