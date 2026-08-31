@@ -54,6 +54,10 @@ class EntryIntent:
     stop_loss: float
     entry_time_ms: float
     reason: str = ""
+    # Optional "mean" / target price the entry wants to revert to (VWAP, BB
+    # midline, or the opposing liquidity pool). Used ONLY by the target_mean exit
+    # model; None for trend entries (they ride the trend, no fixed mean target).
+    target_price: float | None = None
 
     @property
     def r_distance(self) -> float:
@@ -113,7 +117,8 @@ class ExitModel:
     target_rr: float = 2.0
 
     def simulate(self, entry: float, direction: Direction, stop: float,
-                 future: list[Candle], atr_at_entry: float | None) -> _Outcome:
+                 future: list[Candle], atr_at_entry: float | None,
+                 target_price: float | None = None) -> _Outcome:
         raise NotImplementedError
 
     # Shared: value any unresolved remainder at the last bar's close.
@@ -129,7 +134,7 @@ class FixedRR(ExitModel):
         self.target_rr = rr
         self.name = f"fixed_rr{rr:g}"
 
-    def simulate(self, entry, direction, stop, future, atr_at_entry):
+    def simulate(self, entry, direction, stop, future, atr_at_entry, target_price=None):
         R = abs(entry - stop)
         sign = direction.sign
         tp = entry + self.rr * R * sign
@@ -152,7 +157,7 @@ class BreakevenAfter1R(ExitModel):
         self.target_rr = rr
         self.name = f"breakeven{be_at:g}R_rr{rr:g}"
 
-    def simulate(self, entry, direction, stop, future, atr_at_entry):
+    def simulate(self, entry, direction, stop, future, atr_at_entry, target_price=None):
         R = abs(entry - stop)
         sign = direction.sign
         tp = entry + self.rr * R * sign
@@ -181,7 +186,7 @@ class TimeStop(ExitModel):
         self.target_rr = rr
         self.name = f"time_stop_rr{rr:g}_{max_bars}b"
 
-    def simulate(self, entry, direction, stop, future, atr_at_entry):
+    def simulate(self, entry, direction, stop, future, atr_at_entry, target_price=None):
         R = abs(entry - stop)
         sign = direction.sign
         tp = entry + self.rr * R * sign
@@ -205,7 +210,7 @@ class AtrTrailing(ExitModel):
         self.target_rr = 2.0     # nominal; realized RR varies
         self.name = f"atr_trail{atr_mult:g}"
 
-    def simulate(self, entry, direction, stop, future, atr_at_entry):
+    def simulate(self, entry, direction, stop, future, atr_at_entry, target_price=None):
         # Fall back to 1R as the trail distance if ATR is unavailable.
         dist = self.atr_mult * (atr_at_entry if atr_at_entry and atr_at_entry > 0 else abs(entry - stop))
         sign = direction.sign
@@ -232,7 +237,7 @@ class ScaleRunner(ExitModel):
         self.target_rr = first_rr
         self.name = f"scale_rr{first_rr:g}_trail{atr_mult:g}"
 
-    def simulate(self, entry, direction, stop, future, atr_at_entry):
+    def simulate(self, entry, direction, stop, future, atr_at_entry, target_price=None):
         R = abs(entry - stop)
         sign = direction.sign
         first_tp = entry + self.first_rr * R * sign
@@ -270,6 +275,46 @@ class ScaleRunner(ExitModel):
         return _Outcome(legs, last.timestamp_ms, bars, best, worst, False)
 
 
+class MeanTargetExit(ExitModel):
+    """Take profit when price returns to the 'mean' the entry carries as
+    ``target_price`` (VWAP / BB midline for a fade; the opposing liquidity pool
+    for a sweep). This is the NATURAL exit for a mean-reversion entry: the thesis
+    is "snap back to the middle", so bank the trade WHEN THE MIDDLE IS REACHED —
+    wherever that is — instead of waiting for a fixed 2R the reversion may never
+    reach.
+
+    Falls back to a fixed-RR target when the entry carries no ``target_price``
+    (e.g. trend entries), or if the carried level isn't on the profit side of
+    entry, so this model is ALWAYS well-defined and never errors. Money-safety is
+    identical to FixedRR: the stop is checked against the full bar BEFORE the TP
+    (stop wins on an ambiguous bar).
+    """
+
+    def __init__(self, fallback_rr: float = 2.0):
+        self.fallback_rr = fallback_rr
+        self.target_rr = fallback_rr   # nominal; realized RR varies with the mean
+        self.name = "target_mean"
+
+    def simulate(self, entry, direction, stop, future, atr_at_entry, target_price=None):
+        R = abs(entry - stop)
+        sign = direction.sign
+        # Use the carried mean if it's on the profit side; else fall back to RR.
+        if target_price is not None and (target_price - entry) * sign > 0:
+            tp = target_price
+        else:
+            tp = entry + self.fallback_rr * R * sign
+        best = worst = entry
+        bars = 0
+        for c in future:
+            bars += 1
+            best, worst = _excursion(direction, best, worst, c.high, c.low)
+            if _stop_hit(direction, stop, c.low, c.high):
+                return _Outcome([(1.0, stop, ExitReason.STOP_LOSS)], c.timestamp_ms, bars, best, worst, True)
+            if _tp_hit(direction, tp, c.low, c.high):
+                return _Outcome([(1.0, tp, ExitReason.TAKE_PROFIT)], c.timestamp_ms, bars, best, worst, True)
+        return self._flatten(future, entry, best, worst, bars)
+
+
 def default_exit_models() -> list[ExitModel]:
     """The lean, purpose-built set swept per entry."""
     return [
@@ -278,6 +323,7 @@ def default_exit_models() -> list[ExitModel]:
         ScaleRunner(2.0, 0.5, 2.0),
         AtrTrailing(2.0),
         TimeStop(2.0, 24),
+        MeanTargetExit(2.0),
     ]
 
 
@@ -315,7 +361,8 @@ def simulate_entry(
     lots = sizing.lot_size
 
     outcome = model.simulate(
-        intent.entry_price, intent.direction, intent.stop_loss, future_candles, atr_at_entry
+        intent.entry_price, intent.direction, intent.stop_loss, future_candles, atr_at_entry,
+        target_price=intent.target_price,
     )
     if not outcome.legs:
         return None

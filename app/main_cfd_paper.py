@@ -106,7 +106,7 @@ except ImportError:
     _HAS_CMD_BOT = False
 from app.telegram.cfd_notifier import ENGINE_NAME, CFDTradeNotifier
 from app.telegram.mt5_notifier import MT5Notifier
-from app.utils import forex_hours
+from app.utils import forex_hours, memory_probe
 from app.utils.config import load_config
 from app.utils.logger import get_logger
 
@@ -210,12 +210,22 @@ class CFDPaperTradingApp:
         self._backfill_max_days = _env_float("CFD_BACKFILL_MAX_DAYS", 3.0)
         # Pause between historical requests during backfill (cTrader rate-limits
         # get_trendbars; a rapid 10-symbol burst gets throttled).
-        self._backfill_pause_s = _env_float("CFD_BACKFILL_PAUSE_S", 1.0)
+        self._backfill_pause_s = _env_float("CFD_BACKFILL_PAUSE_S", 3.0)
         # Minimum window each backfill scans (fills recent interior holes, not
         # just a trailing gap), and a debounce so a reconnect flap can't hammer
         # the historical API.
+        #
+        # The 90s default caused a SELF-SUSTAINING DISCONNECT LOOP (Aug 27–31):
+        # reconnect -> backfill burst (~10 trendbar requests) -> the demo server
+        # went silent ~50-70s later -> our 30s heartbeat timeout dropped the
+        # link -> reconnect -> 90s debounce expired -> another burst -> forever
+        # (~800-980 losses/day for 5 days, market open OR closed). With a 30min
+        # min-interval a post-drop burst is isolated enough that the connection
+        # stays up (a single burst never killed a calm connection — see the
+        # stable Aug 24-26 stretch). 5m-candle gaps linger <=30min, which is
+        # acceptable for the research archive.
         self._backfill_lookback_h = _env_float("CFD_BACKFILL_LOOKBACK_H", 6.0)
-        self._backfill_min_interval_s = _env_float("CFD_BACKFILL_MIN_INTERVAL_S", 90.0)
+        self._backfill_min_interval_s = _env_float("CFD_BACKFILL_MIN_INTERVAL_S", 1800.0)
         self._last_backfill_monotonic = 0.0
         self._use_staging = _env_bool("CFD_CTRADER_STAGING", self._feed_kind == "ctrader")
         self._candle_store = LiveCandleStore(
@@ -721,12 +731,15 @@ class CFDPaperTradingApp:
         summaries = self._manager.summaries()
         open_positions = sum(len(v) for v in self._manager.open_positions().values())
         bal = summaries[0]["balance"] if summaries else 0.0
+        rss = memory_probe.rss_mb()
+        rss_txt = f" | rss={rss:.0f}MB" if rss is not None else ""
         logger.info(
             "STATS | ticks=%d candles=%d signals=%d | open_pos=%d bal=$%.2f "
-            "| sessions=%s | live: %s%s",
+            "| sessions=%s%s | live: %s%s",
             self._tick_count, self._candle_count, self._signal_count,
             open_positions, bal,
             "+".join(sessions) if sessions else "closed",
+            rss_txt,
             live, " ..." if len(snapshot) > 5 else "",
         )
 
@@ -745,6 +758,9 @@ class CFDPaperTradingApp:
         """
         while self._monitor_running:
             try:
+                # Memory probe: SIGUSR2 requests are serviced off the loop
+                # thread (see app/utils/memory_probe.py). Cheap no-op normally.
+                memory_probe.maybe_dump()
                 self._tick_schedule()
                 self._tick_transitions()
             except Exception as e:  # noqa: BLE001 - monitor must never crash the app
@@ -999,6 +1015,10 @@ class CFDPaperTradingApp:
 
         signal.signal(signal.SIGINT, shutdown)
         signal.signal(signal.SIGTERM, shutdown)
+
+        # Memory diagnostics (no-op unless CFD_TRACEMALLOC=1; SIGUSR2 dumps a
+        # heap report without restarting the service).
+        memory_probe.start_probe()
 
         self._maybe_backfill()
 

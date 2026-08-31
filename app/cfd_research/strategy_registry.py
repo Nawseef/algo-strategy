@@ -29,7 +29,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from app.cfd_research.entries.gap_fade import OpeningGapFade
+from app.cfd_research.entries.liquidity_sweep import LiquiditySweep
+from app.cfd_research.entries.mean_reversion import MeanReversion
+from app.cfd_research.entries.rsi2_reversion import Rsi2Reversion
 from app.cfd_research.entries.session_orb import SessionORB
+from app.cfd_research.entries.squeeze_breakout import SqueezeBreakout
+from app.cfd_research.entries.trend_pullback import TrendPullback
+from app.cfd_research.entries.volatility_breakout import VolatilityBreakout
 from app.cfd_research.entry_strategy import EntryStrategy
 
 
@@ -56,6 +63,142 @@ def _build_orb(cfg: dict) -> list[EntryStrategy]:
     return out
 
 
+def _build_mr(cfg: dict) -> list[EntryStrategy]:
+    """Mean-Reversion: one variant per timeframe (fire-anytime, not session-triggered)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(MeanReversion(
+            bb_period=cfg.get("bb_period", 20),
+            bb_std=cfg.get("bb_std", 2.0),
+            adx_threshold=cfg.get("adx_threshold", 25.0),
+            adx_period=cfg.get("adx_period", 14),
+            atr_period=cfg.get("atr_period", 14),
+            atr_stop_mult=cfg.get("atr_stop_mult", 1.0),
+            min_vwap_dev=cfg.get("min_vwap_dev", 1.5),
+            require_rejection=cfg.get("require_rejection", True),
+            cooldown_bars=cfg.get("cooldown_bars", 6),
+            session_vwap=cfg.get("session_vwap", True),
+            timeframe=tf,
+        ))
+    return out
+
+
+def _build_sweep(cfg: dict) -> list[EntryStrategy]:
+    """Liquidity Sweep: variants per timeframe (fire-anytime, not session-triggered).
+
+    IMPORTANT (CFD data reality): CFDs have NO real traded volume — the feed only
+    carries TICK volume (quote-update count), so the VWAP confirmation is a proxy,
+    not a true institutional VWAP. Rather than trust the proxy, we build BOTH a
+    VWAP-on and a VWAP-off variant (distinct strategy_ids: ``..._novwap``) so the
+    scorer directly answers "does the tick-VWAP filter actually add edge on CFD
+    data?" — clean, evidence-based attribution. Override with
+    ``sweep_require_vwap`` to force one side only.
+    """
+    out: list[EntryStrategy] = []
+    # If the caller explicitly sets sweep_require_vwap, honour it (one side);
+    # otherwise sweep BOTH so the data decides whether the proxy VWAP helps.
+    if "sweep_require_vwap" in cfg:
+        vwap_modes = [bool(cfg["sweep_require_vwap"])]
+    else:
+        vwap_modes = [True, False]
+    for tf in cfg["timeframes"]:
+        for require_vwap in vwap_modes:
+            out.append(LiquiditySweep(
+                lookback=cfg.get("sweep_lookback", 20),
+                ema_len=cfg.get("sweep_ema", 9),
+                sl_buffer_atr=cfg.get("sweep_sl_buffer_atr", 0.1),
+                atr_period=cfg.get("atr_period", 14),
+                require_ema=cfg.get("sweep_require_ema", True),
+                require_vwap=require_vwap,
+                cooldown_bars=cfg.get("sweep_cooldown_bars", 3),
+                timeframe=tf,
+            ))
+    return out
+
+
+def _build_pullback(cfg: dict) -> list[EntryStrategy]:
+    """Trend Pullback: one variant per timeframe (fire-anytime, not session-triggered)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(TrendPullback(
+            ema_fast=cfg.get("pb_ema_fast", 20),
+            ema_slow=cfg.get("pb_ema_slow", 50),
+            adx_period=cfg.get("adx_period", 14),
+            adx_min=cfg.get("pb_adx_min", 20.0),
+            atr_period=cfg.get("atr_period", 14),
+            sl_buffer_atr=cfg.get("pb_sl_buffer_atr", 0.2),
+            rsi_period=cfg.get("pb_rsi_period", 14),
+            require_momentum=cfg.get("pb_require_momentum", True),
+            cooldown_bars=cfg.get("pb_cooldown_bars", 4),
+            timeframe=tf,
+        ))
+    return out
+
+
+def _build_gapfade(cfg: dict) -> list[EntryStrategy]:
+    """Opening gap fade: one variant per timeframe (one entry per day)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(OpeningGapFade(
+            min_gap_atr=cfg.get("gap_min_atr", 0.25),
+            max_gap_atr=cfg.get("gap_max_atr", 4.0),
+            atr_period=cfg.get("atr_period", 14),
+            sl_atr_mult=cfg.get("gap_sl_atr_mult", 1.0),
+            timeframe=tf,
+        ))
+    return out
+
+
+def _build_rsi2(cfg: dict) -> list[EntryStrategy]:
+    """Larry Connors RSI-2: one variant per timeframe (fire-anytime)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(Rsi2Reversion(
+            rsi_period=cfg.get("rsi2_period", 2),
+            oversold=cfg.get("rsi2_oversold", 10.0),
+            overbought=cfg.get("rsi2_overbought", 90.0),
+            trend_ma=cfg.get("rsi2_trend_ma", 200),
+            exit_ma=cfg.get("rsi2_exit_ma", 5),
+            atr_period=cfg.get("atr_period", 14),
+            sl_atr_mult=cfg.get("rsi2_sl_atr_mult", 1.5),
+            cooldown_bars=cfg.get("rsi2_cooldown_bars", 3),
+            timeframe=tf,
+        ))
+    return out
+
+
+def _build_squeeze(cfg: dict) -> list[EntryStrategy]:
+    """TTM Squeeze breakout: one variant per timeframe (fire-anytime)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(SqueezeBreakout(
+            bb_period=cfg.get("sqz_bb_period", 20),
+            bb_std=cfg.get("sqz_bb_std", 2.0),
+            kc_ema=cfg.get("sqz_kc_ema", 20),
+            kc_atr=cfg.get("sqz_kc_atr", 10),
+            kc_mult=cfg.get("sqz_kc_mult", 1.5),
+            mom_len=cfg.get("sqz_mom_len", 20),
+            atr_period=cfg.get("atr_period", 14),
+            sl_atr_mult=cfg.get("sqz_sl_atr_mult", 1.5),
+            cooldown_bars=cfg.get("sqz_cooldown_bars", 6),
+            timeframe=tf,
+        ))
+    return out
+
+
+def _build_lwvb(cfg: dict) -> list[EntryStrategy]:
+    """Larry Williams volatility breakout: one variant per timeframe (day-trade)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(VolatilityBreakout(
+            k=cfg.get("lwvb_k", 0.5),
+            atr_period=cfg.get("atr_period", 14),
+            require_vol_expansion=cfg.get("lwvb_vol_expansion", False),
+            timeframe=tf,
+        ))
+    return out
+
+
 # The registry. Add new research entries here (one line) — the CLI, exit sweep,
 # tagging, gates, challenge sim and OOS split all work unchanged.
 REGISTRY: dict[str, ResearchStrategySpec] = {
@@ -64,6 +207,48 @@ REGISTRY: dict[str, ResearchStrategySpec] = {
         description="Session opening-range breakout (session-triggered)",
         build=_build_orb,
         session_triggered=True,
+    ),
+    "mr": ResearchStrategySpec(
+        key="mr",
+        description="Mean-reversion VWAP/BB fade (fire-anytime, regime-filtered)",
+        build=_build_mr,
+        session_triggered=False,
+    ),
+    "sweep": ResearchStrategySpec(
+        key="sweep",
+        description="Liquidity-sweep (stop-hunt) reversal (fire-anytime, confirmation-filtered)",
+        build=_build_sweep,
+        session_triggered=False,
+    ),
+    "pullback": ResearchStrategySpec(
+        key="pullback",
+        description="Trend-continuation EMA-pullback bounce (fire-anytime, trend-regime-filtered)",
+        build=_build_pullback,
+        session_triggered=False,
+    ),
+    "lwvb": ResearchStrategySpec(
+        key="lwvb",
+        description="Larry Williams volatility breakout (prior-day range projected off the open; day-trade)",
+        build=_build_lwvb,
+        session_triggered=False,
+    ),
+    "squeeze": ResearchStrategySpec(
+        key="squeeze",
+        description="TTM Squeeze breakout (John Carter; BB-inside-KC compression releases into momentum)",
+        build=_build_squeeze,
+        session_triggered=False,
+    ),
+    "rsi2": ResearchStrategySpec(
+        key="rsi2",
+        description="Larry Connors RSI-2 (trend-aligned oscillator mean reversion; exit at the mean)",
+        build=_build_rsi2,
+        session_triggered=False,
+    ),
+    "gapfade": ResearchStrategySpec(
+        key="gapfade",
+        description="Opening gap fade (fade the overnight gap toward the prior close; indices esp.)",
+        build=_build_gapfade,
+        session_triggered=False,
     ),
 }
 
