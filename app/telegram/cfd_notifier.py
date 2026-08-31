@@ -176,10 +176,10 @@ def _code(text: str) -> str:
 
 
 # ─── Icons ─────────────────────────────────────────────────────────────
-# Direction icons — cat face for LONG, bear for SHORT.
+# Direction icons — up arrow for LONG, down arrow for SHORT.
 _DIR_ICON = {
-    "LONG": "\U0001f431",    # 🐱 cat   (long)
-    "SHORT": "\U0001f43b",   # 🐻 bear  (short)
+    "LONG": "\u2b06\ufe0f",    # ⬆️ up   (long)
+    "SHORT": "\u2b07\ufe0f",   # ⬇️ down (short)
 }
 
 # Per-KIND header icon (the account TYPE the trade ran on).
@@ -189,8 +189,8 @@ _KIND_ICON = {
     "live": "\u26a1",        # ⚡ live   (real prop-firm / funded money)
 }
 
-# Entry alert icon: ⬆️ + kind icon (composed at call site).
-_ENTRY_ARROW = "\u2b06\ufe0f"   # ⬆️
+# Entry alert icon: 🚪 door + kind icon (composed at call site).
+_ENTRY_ARROW = "\U0001f6aa"   # 🚪 door (entry)
 
 # Exit outcome icons: 💹💰 for win, 📛💰 for loss (+ kind icon at call site).
 _EXIT_ICON_WIN = "\U0001f4b9\U0001f4b0"    # 💹💰
@@ -307,7 +307,7 @@ class CFDTradeNotifier:
         sym = pos.instrument
         tps = ", ".join(_price(p, sym) for p in plan.take_profit_prices)
 
-        dir_icon = _DIR_ICON.get(pos.direction.value, "\U0001f431")
+        dir_icon = _DIR_ICON.get(pos.direction.value, "\u2b06\ufe0f")
         kind_icon = _KIND_ICON.get(kind, "\U0001f4e5")
 
         # Compact card — no words like ENTRY/LONG/SHORT, emojis say it

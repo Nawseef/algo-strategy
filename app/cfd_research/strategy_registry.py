@@ -29,8 +29,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from app.cfd_research.entries.gap_fade import OpeningGapFade
 from app.cfd_research.entries.liquidity_sweep import LiquiditySweep
 from app.cfd_research.entries.mean_reversion import MeanReversion
+from app.cfd_research.entries.rsi2_reversion import Rsi2Reversion
 from app.cfd_research.entries.session_orb import SessionORB
 from app.cfd_research.entries.squeeze_breakout import SqueezeBreakout
 from app.cfd_research.entries.trend_pullback import TrendPullback
@@ -133,6 +135,38 @@ def _build_pullback(cfg: dict) -> list[EntryStrategy]:
     return out
 
 
+def _build_gapfade(cfg: dict) -> list[EntryStrategy]:
+    """Opening gap fade: one variant per timeframe (one entry per day)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(OpeningGapFade(
+            min_gap_atr=cfg.get("gap_min_atr", 0.25),
+            max_gap_atr=cfg.get("gap_max_atr", 4.0),
+            atr_period=cfg.get("atr_period", 14),
+            sl_atr_mult=cfg.get("gap_sl_atr_mult", 1.0),
+            timeframe=tf,
+        ))
+    return out
+
+
+def _build_rsi2(cfg: dict) -> list[EntryStrategy]:
+    """Larry Connors RSI-2: one variant per timeframe (fire-anytime)."""
+    out: list[EntryStrategy] = []
+    for tf in cfg["timeframes"]:
+        out.append(Rsi2Reversion(
+            rsi_period=cfg.get("rsi2_period", 2),
+            oversold=cfg.get("rsi2_oversold", 10.0),
+            overbought=cfg.get("rsi2_overbought", 90.0),
+            trend_ma=cfg.get("rsi2_trend_ma", 200),
+            exit_ma=cfg.get("rsi2_exit_ma", 5),
+            atr_period=cfg.get("atr_period", 14),
+            sl_atr_mult=cfg.get("rsi2_sl_atr_mult", 1.5),
+            cooldown_bars=cfg.get("rsi2_cooldown_bars", 3),
+            timeframe=tf,
+        ))
+    return out
+
+
 def _build_squeeze(cfg: dict) -> list[EntryStrategy]:
     """TTM Squeeze breakout: one variant per timeframe (fire-anytime)."""
     out: list[EntryStrategy] = []
@@ -202,6 +236,18 @@ REGISTRY: dict[str, ResearchStrategySpec] = {
         key="squeeze",
         description="TTM Squeeze breakout (John Carter; BB-inside-KC compression releases into momentum)",
         build=_build_squeeze,
+        session_triggered=False,
+    ),
+    "rsi2": ResearchStrategySpec(
+        key="rsi2",
+        description="Larry Connors RSI-2 (trend-aligned oscillator mean reversion; exit at the mean)",
+        build=_build_rsi2,
+        session_triggered=False,
+    ),
+    "gapfade": ResearchStrategySpec(
+        key="gapfade",
+        description="Opening gap fade (fade the overnight gap toward the prior close; indices esp.)",
+        build=_build_gapfade,
         session_triggered=False,
     ),
 }

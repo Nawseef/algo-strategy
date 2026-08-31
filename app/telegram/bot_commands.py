@@ -324,7 +324,7 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         for pos in positions:
             total_count += 1
-            dir_icon = "\U0001f431" if pos.direction.value == "LONG" else "\U0001f43b"
+            dir_icon = "\u2b06\ufe0f" if pos.direction.value == "LONG" else "\u2b07\ufe0f"
             plan = pos.exit_plan
             sym = pos.instrument
 
