@@ -136,6 +136,18 @@ class MultiAccountManager:
         for ex in self._executors.values():
             ex.flatten_all(reason)
 
+    def flatten_all_blocking(
+        self, reason: ExitReason = ExitReason.EOD_FLATTEN, timeout: float = 10.0,
+    ) -> None:
+        """Flatten every account and block until each executor's closes are sent
+        (used on shutdown so async/live closes actually leave the box)."""
+        for ex in self._executors.values():
+            try:
+                ex.flatten_all_blocking(reason, timeout=timeout)
+            except Exception as e:  # noqa: BLE001 - one account must not block others
+                logger.error("flatten_all_blocking failed for account %s: %s",
+                             ex.account_id, e)
+
     def flatten_instrument(
         self, instrument: str, reason: ExitReason = ExitReason.MANUAL,
     ) -> int:
