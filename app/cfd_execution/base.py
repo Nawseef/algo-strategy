@@ -354,6 +354,18 @@ class BaseExecutor(ABC):
         """Force-close all open positions (weekend / risk / shutdown)."""
         ...
 
+    def flatten_all_blocking(
+        self, reason: ExitReason = ExitReason.EOD_FLATTEN, timeout: float = 10.0,
+    ) -> None:
+        """Force-close all positions and BLOCK until done (used on shutdown).
+
+        Default: a synchronous executor (paper) closes in-process, so this is just
+        ``flatten_all``. An async/live executor (cTrader) overrides this to wait
+        for the broker close to actually be sent before the process/loop tears
+        down — otherwise the fire-and-forget close never leaves the box.
+        """
+        self.flatten_all(reason)
+
     @abstractmethod
     def flatten_instrument(
         self, instrument: str, reason: ExitReason = ExitReason.MANUAL,

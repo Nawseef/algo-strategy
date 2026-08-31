@@ -39,6 +39,7 @@ this only after a strategy proves out in paper, and start on the demo account.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -277,9 +278,14 @@ class CTraderExecutor(BaseExecutor):
                 continue
             pos.bars_open += 1
             if time_stop_reached(pos) and pos_id not in self._closing_full:
-                self._closing_full.add(pos_id)
-                logger.info("[%s] time-stop -> closing remainder of pos %s", self.account_id, pos_id)
-                self._run(self._close_volume(pos_id, self._remaining_volume(pos_id, pos)))
+                vol = self._remaining_volume(pos_id, pos)
+                if vol > 0:
+                    self._closing_full.add(pos_id)
+                    logger.info("[%s] time-stop -> closing remainder of pos %s", self.account_id, pos_id)
+                    self._run_full_close(pos_id, vol)
+                else:
+                    logger.warning("[%s] time-stop pos %s: no resolvable volume; not guarding",
+                                   self.account_id, pos_id)
 
     def on_day_reset(self, timestamp_ms: float | None = None) -> None:
         self._risk.check_daily_reset(timestamp_ms)
@@ -435,12 +441,13 @@ class CTraderExecutor(BaseExecutor):
 
         if volume <= 0:
             return
-        try:
-            await self._broker.client.trading.close_position(
-                self._broker.account_id, ClosePositionRequest(position_id=pos_id, volume=int(volume))
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.error("[%s] close_position failed for %s: %s", self.account_id, pos_id, e)
+        # NOTE: do NOT swallow here — let the exception propagate to the caller's
+        # future done-callback so a FAILED full-close can release the _closing_full
+        # guard and be retried (a swallowed error left the position open AND
+        # permanently blocked from re-closing). The callbacks log it.
+        await self._broker.client.trading.close_position(
+            self._broker.account_id, ClosePositionRequest(position_id=pos_id, volume=int(volume))
+        )
 
     # ─── Volume helpers ──────────────────────────────────────────
 
@@ -690,12 +697,49 @@ class CTraderExecutor(BaseExecutor):
             out = [p for p in out if p.instrument == instrument]
         return out
 
+    def _schedule_full_closes(self, instrument: str | None = None):
+        """Schedule a full close for each OPEN, not-already-closing position
+        (optionally filtered to one instrument). Returns the list of futures so a
+        blocking caller (shutdown) can wait on them. A position whose volume can't
+        be resolved is skipped WITHOUT setting the guard, so it stays retryable."""
+        futs = []
+        for pos_id, pos in list(self._positions.items()):
+            if pos.status is not PositionStatus.OPEN or pos_id in self._closing_full:
+                continue
+            if instrument is not None and pos.instrument != instrument:
+                continue
+            vol = self._remaining_volume(pos_id, pos)
+            if vol <= 0:
+                logger.warning("[%s] flatten pos %s: no resolvable volume; not guarding",
+                               self.account_id, pos_id)
+                continue
+            self._closing_full.add(pos_id)
+            futs.append(self._run_full_close(pos_id, vol))
+        return futs
+
     def flatten_all(self, reason: ExitReason = ExitReason.EOD_FLATTEN) -> None:
         """Close ONLY the positions this executor opened (never the whole account)."""
-        for pos_id, pos in list(self._positions.items()):
-            if pos.status is PositionStatus.OPEN and pos_id not in self._closing_full:
-                self._closing_full.add(pos_id)
-                self._run(self._close_volume(pos_id, self._remaining_volume(pos_id, pos)))
+        self._schedule_full_closes()
+
+    def flatten_all_blocking(
+        self, reason: ExitReason = ExitReason.EOD_FLATTEN, timeout: float = 10.0,
+    ) -> None:
+        """Like ``flatten_all`` but BLOCKS until each close request has been sent
+        + acked (or the timeout elapses). Used on shutdown: the fire-and-forget
+        path let the process exit before the broker loop ran the close, leaving
+        the demo position open. Must be called while the broker loop is still
+        alive (i.e. BEFORE stopping the feed)."""
+        futs = self._schedule_full_closes()
+        deadline = time.monotonic() + timeout
+        for f in futs:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error("[%s] shutdown flatten timed out waiting for closes", self.account_id)
+                break
+            try:
+                f.result(timeout=remaining)
+            except Exception as e:  # noqa: BLE001
+                logger.error("[%s] shutdown flatten close failed: %s", self.account_id, e)
 
     def flatten_instrument(
         self, instrument: str, reason: ExitReason = ExitReason.MANUAL,
@@ -707,15 +751,7 @@ class CTraderExecutor(BaseExecutor):
         ``_closing_full`` so a position isn't double-closed. Never touches
         positions on other instruments, nor positions this executor didn't open.
         """
-        closed = 0
-        for pos_id, pos in list(self._positions.items()):
-            if (pos.instrument == instrument
-                    and pos.status is PositionStatus.OPEN
-                    and pos_id not in self._closing_full):
-                self._closing_full.add(pos_id)
-                self._run(self._close_volume(pos_id, self._remaining_volume(pos_id, pos)))
-                closed += 1
-        return closed
+        return len(self._schedule_full_closes(instrument=instrument))
 
     # ─── Persistence + alerts (shared shape with PaperExecutor) ───
 
@@ -798,6 +834,31 @@ class CTraderExecutor(BaseExecutor):
                 logger.error("[%s] async order op failed: %s", self.account_id, e)
 
         fut.add_done_callback(_log)
+
+    def _run_full_close(self, pos_id: int, volume: int):
+        """Schedule a FULL close and, on failure, RELEASE the ``_closing_full``
+        guard so the flatten can be retried on the next tick.
+
+        Without the release, a single failed close (broker hiccup, rate limit,
+        transient disconnect) left the position OPEN *and* permanently in
+        ``_closing_full`` — blocking the next day's entry for that
+        instrument/strategy and any auto-retry, so only a manual close recovered
+        it. Returns the future so shutdown can wait on it.
+        """
+        fut = asyncio.run_coroutine_threadsafe(
+            self._close_volume(pos_id, volume), self._broker.loop
+        )
+
+        def _done(f):
+            try:
+                f.result()
+            except Exception as e:  # noqa: BLE001
+                logger.error("[%s] full-close failed for %s: %s — releasing guard for retry",
+                             self.account_id, pos_id, e)
+                self._closing_full.discard(pos_id)
+
+        fut.add_done_callback(_done)
+        return fut
 
     @staticmethod
     def _event_ms(event) -> float:

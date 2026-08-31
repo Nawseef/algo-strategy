@@ -807,24 +807,31 @@ class CFDPaperTradingApp:
                         except Exception as e:  # noqa: BLE001
                             logger.error("periodic summary failed: %s", e)
 
-        # Weekend flatten: fire once when we enter the pre-close window; re-arm
-        # after the market closes for the weekend.
+        # Weekend flatten: while inside the pre-close window, RE-ISSUE the flatten
+        # each tick as long as anything is still open (a transient broker close
+        # failure on one account — e.g. demo — is retried instead of leaving the
+        # position open until Monday). Already-closing positions are guarded, so
+        # this never double-closes. The Telegram notice fires once.
         if self._flatten_weekend:
             if forex_hours.should_flatten_before_weekend():
-                if not self._weekend_flattened:
-                    logger.info("Pre-weekend flatten window — flattening all positions")
+                if any(self._manager.open_positions().values()):
+                    logger.info("Pre-weekend flatten window — flattening open positions")
                     self._manager.flatten_all(ExitReason.EOD_FLATTEN)
+                if not self._weekend_flattened:
                     self._weekend_flattened = True
                     self._notifier.send("\U0001f3c1 Pre-weekend flatten — all positions closed")
             if not market_open:
                 self._weekend_flattened = False  # re-arm for next week
 
-        # Daily-reset flatten (only if the account's rules ask for it).
+        # Daily-reset flatten (only if the account's rules ask for it). Same
+        # retry-while-open behaviour so a failed demo close is re-attempted next
+        # tick rather than riding overnight and blocking the next day's entry.
         if self._flatten_reset:
             if forex_hours.should_flatten_before_daily_reset():
-                if not self._daily_flattened:
-                    logger.info("Pre-daily-reset flatten window — flattening all positions")
+                if any(self._manager.open_positions().values()):
+                    logger.info("Pre-daily-reset flatten window — flattening open positions")
                     self._manager.flatten_all(ExitReason.EOD_FLATTEN)
+                if not self._daily_flattened:
                     self._daily_flattened = True
                     self._notifier.send("\U0001f3c1 Pre-daily-reset flatten — all positions closed")
             else:
@@ -998,9 +1005,13 @@ class CFDPaperTradingApp:
                     stop_command_bot()
                 except Exception as e:  # noqa: BLE001
                     logger.error("command bot stop failed: %s", e)
-            # Flatten open paper positions on shutdown so nothing is left dangling.
+            # Flatten open positions on shutdown so nothing is left dangling.
+            # MUST block until the broker close is actually sent, and MUST run
+            # BEFORE self._feed.stop() (which tears down the cTrader async loop).
+            # The old fire-and-forget flatten_all let the process exit before the
+            # loop ran the close, so the demo position stayed open on a restart.
             try:
-                self._manager.flatten_all(ExitReason.EOD_FLATTEN)
+                self._manager.flatten_all_blocking(ExitReason.EOD_FLATTEN, timeout=10.0)
             except Exception as e:  # noqa: BLE001
                 logger.error("flatten on shutdown failed: %s", e)
             self._feed.stop()
