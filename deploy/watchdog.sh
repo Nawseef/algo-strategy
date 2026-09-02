@@ -42,4 +42,4 @@ check_and_restart() {
 }
 
 check_and_restart "algo-paper"
-check_and_restart "algo-research"
+# check_and_restart "algo-research"  # STOPPED 2 Sep 2026 — 150K NSE research engine retired (dead weight; see VM_REBUILD_CONSUMER_12GB.md)

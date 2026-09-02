@@ -42,3 +42,9 @@ logs/dukascopy_fetch.pid
 
 # Telegram bot runtime pause flag (transient state, not source)
 data/bot_paused.flag
+
+# Database backups (off-VM pg_dump copies — large binaries, never commit).
+# The dumps live here in the project dir so they're easy to find, but git
+# ignores them. See VM_REBUILD_CONSUMER_12GB.md §12.
+backups/
+*.dump
