@@ -7,7 +7,8 @@ Ported from the research-side ``app/cfd_research/entries/session_orb.py`` and th
   1. **orb_usdjpy_tokyo_5m** — USDJPY, Tokyo session open, 5m timeframe, range
      regime only, fixed 2R exit. (Research: 436/436 decisive pass at raw cost.)
   2. **orb_usdjpy_london_15m** — USDJPY, London session open, 15m timeframe,
-     range regime only, fixed 2R exit. (Research: 418 trades, 16% pass at raw.)
+     range regime only, fixed 2R exit. (Research raw/no-vol: 100% decisive pass
+     (d418), 0% blowup, deployable — range_bars=6, i.e. a 90-min opening range.)
 
 Both use the SAME ORB logic as the research engine:
   - Build the opening range over the first ``range_bars`` bars of the session.
@@ -331,7 +332,8 @@ class OrbUsdjpyLondon15m(_LiveSessionORB):
     """USDJPY London 15m ORB — range regime, fixed 2R.
 
     Research slice: instrument=USDJPY session=london timeframe=15m regime=range
-    exit_model=fixed_rr2, risk=0.5%. 418 trades, 16% pass at raw cost.
+    exit_model=fixed_rr2, risk=0.5%. Raw/no-volatility: n=1285, 100% decisive
+    pass (d418), 0% blowup, deployable. Opening range = 6 x 15m bars (90 min).
     """
 
     def __init__(self) -> None:
@@ -340,7 +342,11 @@ class OrbUsdjpyLondon15m(_LiveSessionORB):
             name="USDJPY London ORB 15m (range, fixed 2R)",
             session="london",
             timeframe=Timeframe.M15,
-            range_bars=2,           # 2 x 15m = first 30 min of London
+            range_bars=6,           # 6 x 15m = first 90 min — matches the deployable
+                                    # research slice orb_london_6b (range_bars counts in
+                                    # THIS timeframe's bars, not 5m bars). Was 2 (30 min),
+                                    # which made the live variant a different, unvalidated
+                                    # strategy from the backtested 6-bar slice.
             adx_period=14,
             adx_threshold=22.0,
             rr_target=2.0,
