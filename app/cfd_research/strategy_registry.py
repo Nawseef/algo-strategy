@@ -64,7 +64,14 @@ def _build_orb(cfg: dict) -> list[EntryStrategy]:
 
 
 def _build_mr(cfg: dict) -> list[EntryStrategy]:
-    """Mean-Reversion: one variant per timeframe (fire-anytime, not session-triggered)."""
+    """Mean-Reversion: one variant per timeframe (fire-anytime, not session-triggered).
+
+    Builds BOTH the tight (as-designed) variant AND a LOOSE variant that drops the
+    rejection-candle requirement and lowers the stretch threshold (1.5->1.0xATR).
+    The tight filters starved it to ~3.4 trades/mo (below the 5/mo frequency gate,
+    unscoreable once sliced); the loose variant fires far more often so it can
+    actually be judged. Distinct auto-named strategy_id (``_norej_dev1``).
+    """
     out: list[EntryStrategy] = []
     for tf in cfg["timeframes"]:
         out.append(MeanReversion(
@@ -76,6 +83,20 @@ def _build_mr(cfg: dict) -> list[EntryStrategy]:
             atr_stop_mult=cfg.get("atr_stop_mult", 1.0),
             min_vwap_dev=cfg.get("min_vwap_dev", 1.5),
             require_rejection=cfg.get("require_rejection", True),
+            cooldown_bars=cfg.get("cooldown_bars", 6),
+            session_vwap=cfg.get("session_vwap", True),
+            timeframe=tf,
+        ))
+        # LOOSE: no rejection candle + smaller stretch -> fires several-fold more.
+        out.append(MeanReversion(
+            bb_period=cfg.get("bb_period", 20),
+            bb_std=cfg.get("bb_std", 2.0),
+            adx_threshold=cfg.get("adx_threshold", 25.0),
+            adx_period=cfg.get("adx_period", 14),
+            atr_period=cfg.get("atr_period", 14),
+            atr_stop_mult=cfg.get("atr_stop_mult", 1.0),
+            min_vwap_dev=1.0,
+            require_rejection=False,
             cooldown_bars=cfg.get("cooldown_bars", 6),
             session_vwap=cfg.get("session_vwap", True),
             timeframe=tf,
@@ -113,6 +134,19 @@ def _build_sweep(cfg: dict) -> list[EntryStrategy]:
                 cooldown_bars=cfg.get("sweep_cooldown_bars", 3),
                 timeframe=tf,
             ))
+        # LOOSE: drop BOTH confirmations (EMA reclaim + VWAP bias) -> the raw sweep
+        # pattern only, fires far more often (the confirmations starved it below the
+        # scoreable/frequency floor). Distinct id ``sweep_lb20_noema_novwap``.
+        out.append(LiquiditySweep(
+            lookback=cfg.get("sweep_lookback", 20),
+            ema_len=cfg.get("sweep_ema", 9),
+            sl_buffer_atr=cfg.get("sweep_sl_buffer_atr", 0.1),
+            atr_period=cfg.get("atr_period", 14),
+            require_ema=False,
+            require_vwap=False,
+            cooldown_bars=cfg.get("sweep_cooldown_bars", 3),
+            timeframe=tf,
+        ))
     return out
 
 
@@ -141,6 +175,17 @@ def _build_gapfade(cfg: dict) -> list[EntryStrategy]:
     for tf in cfg["timeframes"]:
         out.append(OpeningGapFade(
             min_gap_atr=cfg.get("gap_min_atr", 0.25),
+            max_gap_atr=cfg.get("gap_max_atr", 4.0),
+            atr_period=cfg.get("atr_period", 14),
+            sl_atr_mult=cfg.get("gap_sl_atr_mult", 1.0),
+            timeframe=tf,
+        ))
+        # LOOSE: fade smaller gaps too (min 0.1xATR) so more days qualify. NOTE:
+        # gapfade already scored but FAILED the challenge (a drawdown problem, not
+        # frequency) — more/noisier small gaps may not help. Distinct id
+        # ``gapfade_g0.1-4``.
+        out.append(OpeningGapFade(
+            min_gap_atr=0.1,
             max_gap_atr=cfg.get("gap_max_atr", 4.0),
             atr_period=cfg.get("atr_period", 14),
             sl_atr_mult=cfg.get("gap_sl_atr_mult", 1.0),
@@ -192,6 +237,16 @@ def _build_lwvb(cfg: dict) -> list[EntryStrategy]:
     for tf in cfg["timeframes"]:
         out.append(VolatilityBreakout(
             k=cfg.get("lwvb_k", 0.5),
+            atr_period=cfg.get("atr_period", 14),
+            require_vol_expansion=cfg.get("lwvb_vol_expansion", False),
+            timeframe=tf,
+        ))
+        # LOOSE: smaller breakout increment (k=0.3) triggers on more days. NOTE:
+        # still capped at ONE entry/day by design, so the frequency gain is modest
+        # (the 1/day cap, not the trigger, is the binding constraint). Distinct id
+        # ``lwvb_k0.3``.
+        out.append(VolatilityBreakout(
+            k=0.3,
             atr_period=cfg.get("atr_period", 14),
             require_vol_expansion=cfg.get("lwvb_vol_expansion", False),
             timeframe=tf,
