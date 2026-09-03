@@ -20,5 +20,6 @@ from __future__ import annotations
 # Import strategy modules so their @register_strategy decorators run.
 from app.cfd_strategy.strategies import sma_cross  # noqa: F401
 from app.cfd_strategy.strategies import usdjpy_orb  # noqa: F401
+from app.cfd_strategy.strategies import rsi2_reversion  # noqa: F401
 
-__all__ = ["sma_cross", "usdjpy_orb"]
+__all__ = ["sma_cross", "usdjpy_orb", "rsi2_reversion"]
